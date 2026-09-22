@@ -4,11 +4,13 @@ Single-page character chat. Source lives in this repository and is deployed from
 
 Based on [OpenTavern](https://github.com/PawNzZi/opentavern) ([opentavern.pages.dev](https://opentavern.pages.dev)). Upstream is a single-file app; this repo keeps that snapshot plus local hooks.
 
+Status Center design (what it is for, how tables are read/hidden, acceptance): see [STATUS_CENTER.md](./STATUS_CENTER.md).
+
 ## This repo adds
 
-- Hide `<StatusTable>` / `<OTTable>` / `<Ledger>` in the chat bubble
-- Status Center on the character card (up to 50 tables)
-- Model looks up tables with `status_list` / `status_get` (request body does not dump tables)
+- Hide ledger tags in the chat bubble
+- Status Center UI (up to 50 tables per conversation)
+- Inject tables for the model to read before generate; do not print tables in the visible reply
 
 ## Files
 
@@ -16,7 +18,8 @@ Based on [OpenTavern](https://github.com/PawNzZi/opentavern) ([opentavern.pages.
 - `worker.js` — optional TTS worker sample
 - `icon.png`
 - `ot-boot.js` — storage banner / persist request
-- `ot-status.js` — status center
+- `ot-status.js` — status center implementation (follow STATUS_CENTER.md)
+- `STATUS_CENTER.md` — design requirements
 
 ## Pages
 
