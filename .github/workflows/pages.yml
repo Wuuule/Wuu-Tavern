@@ -18,9 +18,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Bake upstream page
+        run: |
+          mkdir -p dist
+          curl -fsSL https://opentavern.pages.dev/ -o dist/index.html
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          p = Path('dist/index.html')
+          html = p.read_text(encoding='utf-8', errors='replace')
+          if 'function persistState' not in html and 'OpenTavern' not in html:
+              raise SystemExit('upstream page does not look like OpenTavern')
+          tag = '<script src="./ot-status.js"></script>\n'
+          if 'ot-status.js' not in html:
+              html, n = re.subn(r'</body>', tag + '</body>', html, count=1, flags=re.I)
+              if n == 0:
+                  html += tag
+          p.write_text(html, encoding='utf-8')
+          print('baked', p.stat().st_size, 'bytes')
+          PY
+          cp ot-status.js dist/ot-status.js
+          touch dist/.nojekyll
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: .
+          path: dist
       - id: deployment
         uses: actions/deploy-pages@v4
