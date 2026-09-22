@@ -18,44 +18,47 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Bake upstream page
+      - name: Fetch official OpenTavern files
         run: |
           mkdir -p dist
           curl -fsSL https://opentavern.pages.dev/ -o dist/index.html
+          curl -fsSL https://opentavern.pages.dev/worker.js -o dist/worker.js
+          curl -fsSL https://opentavern.pages.dev/icon.png -o dist/icon.png
+          cp ot-status.js dist/ot-status.js
+          touch dist/.nojekyll
           python3 - <<'PY'
           from pathlib import Path
-          import re
           p = Path('dist/index.html')
           html = p.read_text(encoding='utf-8', errors='replace')
           if 'OpenTavern' not in html:
-              raise SystemExit('upstream page does not look like OpenTavern')
+              raise SystemExit('upstream is not OpenTavern')
           tag = '<script src="./ot-status.js"></script>\n'
-          if 'ot-status.js' not in html:
-              html, n = re.subn(r'</body>', tag + '</body>', html, count=1, flags=re.I)
-              if n == 0:
+          if 'src="./ot-status.js"' not in html:
+              idx = html.lower().rfind('</body>')
+              if idx >= 0:
+                  html = html[:idx] + tag + html[idx:]
+              else:
                   html += tag
           p.write_text(html, encoding='utf-8')
-          print('baked', p.stat().st_size, 'bytes')
+          print('baked', p.stat().st_size)
           PY
-          cp ot-status.js dist/ot-status.js
-          touch dist/.nojekyll
           cp dist/index.html index.html
+          cp dist/worker.js worker.js
+          cp dist/icon.png icon.png
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
       - id: deployment
         uses: actions/deploy-pages@v4
-      - name: Push baked index for branch Pages
+      - name: Push official files to main for branch Pages
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add index.html
+          git add index.html worker.js icon.png ot-status.js .nojekyll
           if git diff --staged --quiet; then
-            echo "index already baked"
+            echo no change
           else
-            git commit -m "chore: bake OpenTavern page [skip ci]"
+            git commit -m "chore: sync official OpenTavern files [skip ci]"
             git push
           fi
