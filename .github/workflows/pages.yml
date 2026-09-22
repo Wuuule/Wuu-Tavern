@@ -25,6 +25,7 @@ jobs:
           curl -fsSL https://opentavern.pages.dev/worker.js -o dist/worker.js
           curl -fsSL https://opentavern.pages.dev/icon.png -o dist/icon.png
           cp ot-status.js dist/ot-status.js
+          cp ot-boot.js dist/ot-boot.js
           touch dist/.nojekyll
           python3 - <<'PY'
           from pathlib import Path
@@ -32,8 +33,8 @@ jobs:
           html = p.read_text(encoding='utf-8', errors='replace')
           if 'OpenTavern' not in html:
               raise SystemExit('upstream is not OpenTavern')
-          tag = '<script src="./ot-status.js"></script>\n'
-          if 'src="./ot-status.js"' not in html:
+          tag = '<script src="./ot-boot.js"></script>\n<script src="./ot-status.js"></script>\n'
+          if 'src="./ot-boot.js"' not in html:
               idx = html.lower().rfind('</body>')
               if idx >= 0:
                   html = html[:idx] + tag + html[idx:]
@@ -55,7 +56,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add index.html worker.js icon.png ot-status.js .nojekyll
+          git add index.html worker.js icon.png ot-status.js ot-boot.js .nojekyll
           if git diff --staged --quiet; then
             echo no change
           else
