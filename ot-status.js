@@ -1,12 +1,15 @@
-/** OpenTavern Status Center — platform overlay, no bundled scenario. */
+/** OpenTavern Status Center. Persist tables; do not dump them on send. */
 (function () {
     var SETTINGS_KEY = 'otStatusCenter';
     var MAX_TABLES = 50;
     var TABLE_RE = /<(?:StatusTable|OTTable|Ledger)\b([^>]*)>([\s\S]*?)<\/(?:StatusTable|OTTable|Ledger)>/gi;
     var OPEN_RE = /<(?:StatusTable|OTTable|Ledger)\b/i;
     var BOOK_MARKER = '[StatusTable:';
+    var TOOL_LIST = 'status_list';
+    var TOOL_GET = 'status_get';
+
     function defaults() {
-        return { enabled: true, hide: true, readBefore: true, writeCard: true, writeWorld: true };
+        return { enabled: true, hide: true, modelLookup: true, writeCard: true, writeWorld: true };
     }
     function getCfg() {
         var base = defaults();
@@ -53,6 +56,10 @@
         }
         return conv.character || null;
     }
+    function listTables(character) {
+        if (!character || !character.extensions) return [];
+        return Array.isArray(character.extensions.otStatusTables) ? character.extensions.otStatusTables : [];
+    }
     function ensureExt(character) {
         if (!character.extensions || typeof character.extensions !== 'object') character.extensions = {};
         if (!Array.isArray(character.extensions.otStatusTables)) character.extensions.otStatusTables = [];
@@ -83,116 +90,93 @@
             var hit = null;
             book.entries.forEach(function (e) { if (e && e.comment === comment) hit = e; });
             if (!hit) {
-                hit = { keys: [table.name, comment], secondary_keys: [], comment: comment, content: '', constant: true, enabled: true, insertion_order: 10 };
+                hit = { keys: [table.name], secondary_keys: [], comment: comment, content: '', constant: false, enabled: true, insertion_order: 10 };
                 book.entries.push(hit);
             }
             hit.content = 'Status table [' + table.name + ']\n' + table.content;
-            hit.constant = true; hit.enabled = true; hit.disable = false;
-        });
-        return true;
-    }
-    function upsertWorldBookMirror(conv, tables) {
-        if (!conv || !tables.length || typeof createNewWorldBook !== 'function' || !window.state) return false;
-        if (!state.worldBooks) state.worldBooks = {};
-        var found = null;
-        Object.keys(state.worldBooks).forEach(function (id) { var wb = state.worldBooks[id]; if (wb && wb.name === 'OT Status Center') found = wb; });
-        if (!found) found = createNewWorldBook('OT Status Center');
-        if (!found) return false;
-        if (!Array.isArray(conv.worldBookIds)) conv.worldBookIds = [];
-        if (conv.worldBookIds.indexOf(found.id) < 0) conv.worldBookIds.unshift(found.id);
-        if (!found.entries || typeof found.entries !== 'object') found.entries = {};
-        tables.forEach(function (table) {
-            var comment = BOOK_MARKER + table.name + ']';
-            var hit = null;
-            Object.keys(found.entries).forEach(function (uid) { var e = found.entries[uid]; if (e && e.comment === comment) hit = e; });
-            if (!hit && typeof createDefaultWIEntry === 'function') { hit = createDefaultWIEntry(); found.entries[hit.uid] = hit; }
-            else if (!hit) { var uid = Date.now(); hit = { uid: uid, comment: comment, key: [table.name], content: '', constant: true }; found.entries[uid] = hit; }
-            hit.comment = comment; hit.key = [table.name];
-            hit.content = 'Status table [' + table.name + ']\n' + table.content;
-            hit.constant = true; hit.disable = false;
+            hit.constant = false;
+            hit.enabled = true;
         });
         return true;
     }
     function applyTables(conv, fullContent) {
         var cfg = getCfg(); if (!cfg.enabled) return;
         var tables = parseTables(fullContent); if (!tables.length) return;
-        var character = activeCharacter(conv); var changed = false;
+        var character = activeCharacter(conv);
         if (cfg.writeCard && character) {
-            if (upsertTablesOnCard(character, tables)) changed = true;
-            if (upsertBookEntries(character, tables)) changed = true;
+            upsertTablesOnCard(character, tables);
+            upsertBookEntries(character, tables);
         }
-        if (cfg.writeWorld && upsertWorldBookMirror(conv, tables)) changed = true;
-        if (!changed) return;
-        conv.updated = Date.now(); if (conv._wiCache) conv._wiCache = null;
+        conv.updated = Date.now();
         try { if (typeof persistState === 'function') persistState(true); } catch (e) {}
         refreshPanel();
     }
-    function listTables(character) {
-        if (!character || !character.extensions) return [];
-        return Array.isArray(character.extensions.otStatusTables) ? character.extensions.otStatusTables : [];
-    }
-    function recentText(messages) {
-        if (!Array.isArray(messages)) return '';
-        var chunks = [];
-        for (var i = messages.length - 1, n = 0; i >= 0 && n < 6; i--) {
-            var c = messages[i] && messages[i].content;
-            if (typeof c === 'string' && c.trim()) { chunks.push(c); n++; }
-        }
-        return chunks.join('\n');
-    }
-    function tokensOf(text) {
-        var parts = String(text || '').toLowerCase().match(/[\u4e00-\u9fff]{2,}|[a-z0-9_]{3,}/g) || [];
-        var out = [];
-        parts.forEach(function (p) { if (out.indexOf(p) < 0) out.push(p); });
-        return out;
-    }
-    function scoreTable(table, tokens) {
-        var name = String(table.name || '');
-        var hay = (name + '\n' + table.content).toLowerCase();
-        var score = 0;
-        tokens.forEach(function (tok) {
-            if (name.toLowerCase().indexOf(tok) >= 0) score += 8;
-            else if (hay.indexOf(tok) >= 0) score += 2;
-        });
-        return score;
-    }
-    function pickRelevantTables(tables, messages) {
-        if (!tables.length) return [];
-        return tables.map(function (t) { return { t: t, score: scoreTable(t, tokensOf(recentText(messages))) }; })
-            .sort(function (a, b) { return b.score - a.score; })
-            .filter(function (x) { return x.score > 0; })
-            .slice(0, 5)
-            .map(function (x) { return x.t; });
-    }
-    function formatStatusPrompt(character, messages) {
-        var tables = listTables(character);
-        if (!tables.length) return '';
-        var picked = pickRelevantTables(tables, messages);
-        var lines = [
-            '[Status Center]',
-            'tables: ' + tables.map(function (t) { return t.name; }).join(', '),
-            'expanded below: only tables matching the current messages'
+    function toolDefs() {
+        return [
+            { type: 'function', function: { name: TOOL_LIST, description: 'List status table names stored on the current character. Call this before writing if you need stored state. Returns names only.', parameters: { type: 'object', properties: {} } } },
+            { type: 'function', function: { name: TOOL_GET, description: 'Read stored status tables by exact name. Call only for tables needed this turn.', parameters: { type: 'object', properties: { names: { type: 'array', items: { type: 'string' } } }, required: ['names'] } } }
         ];
-        if (!picked.length) return lines.join('\n');
-        picked.forEach(function (t) {
-            var body = String(t.content || '').trim();
-            if (body.length > 900) body = body.slice(0, 900) + '...';
-            lines.push('## ' + t.name);
-            lines.push(body);
-        });
-        return lines.join('\n');
+    }
+    function runTool(name, args) {
+        var conv = typeof getActiveConv === 'function' ? getActiveConv() : null;
+        var tables = listTables(activeCharacter(conv));
+        if (name === TOOL_LIST) {
+            return JSON.stringify({ tables: tables.map(function (t) { return t.name; }) });
+        }
+        if (name === TOOL_GET) {
+            var want = (args && args.names) || [];
+            if (typeof want === 'string') want = [want];
+            var found = [];
+            want.forEach(function (n) {
+                var hit = null;
+                tables.forEach(function (t) { if (t.name === n) hit = t; });
+                found.push(hit ? { name: hit.name, content: hit.content } : { name: n, missing: true });
+            });
+            return JSON.stringify({ tables: found });
+        }
+        return JSON.stringify({ error: 'unknown tool' });
+    }
+    function attachTools(payload) {
+        var tools = Array.isArray(payload.tools) ? payload.tools.slice() : [];
+        var have = {};
+        tools.forEach(function (t) { if (t && t.function && t.function.name) have[t.function.name] = true; });
+        toolDefs().forEach(function (t) { if (!have[t.function.name]) tools.push(t); });
+        payload.tools = tools;
+        if (!payload.tool_choice) payload.tool_choice = 'auto';
+        return payload;
     }
     function looksLikeChatPayload(payload) {
         return payload && Array.isArray(payload.messages) && payload.messages.length && (payload.model || payload.stream === true || payload.max_tokens || payload.temperature != null);
     }
-    function injectBlockIntoMessages(messages, block) {
-        if (!Array.isArray(messages) || !block) return messages;
-        var joined = messages.map(function (m) { return m && m.content; }).join('\n');
-        if (joined.indexOf('[Status Center]') >= 0) return messages;
-        var copy = messages.slice();
-        if (copy[0] && copy[0].role === 'system') copy[0] = Object.assign({}, copy[0], { content: block + '\n\n' + (copy[0].content || '') });
-        else copy.unshift({ role: 'system', content: block });
-        return copy;
+    function parseArgs(raw) {
+        if (!raw) return {};
+        if (typeof raw === 'object') return raw;
+        try { return JSON.parse(raw); } catch (e) { return {}; }
+    }
+    function collectToolCalls(choice) {
+        var msg = choice && choice.message;
+        if (msg && Array.isArray(msg.tool_calls) && msg.tool_calls.length) return msg;
+        return null;
+    }
+    async function completeWithTools(origFetch, input, init, payload, hops) {
+        if (hops > 2) return origFetch(input, init);
+        var res = await origFetch(input, Object.assign({}, init, { body: JSON.stringify(payload) }));
+        var ctype = (res.headers.get('content-type') || '').toLowerCase();
+        if (payload.stream || ctype.indexOf('text/event-stream') >= 0) return res;
+        var data = await res.clone().json().catch(function () { return null; });
+        var msg = data && data.choices && collectToolCalls(data.choices[0]);
+        if (!msg) return res;
+        payload.messages = payload.messages.concat([msg]);
+        msg.tool_calls.forEach(function (call) {
+            var fn = call.function || {};
+            payload.messages.push({
+                role: 'tool',
+                tool_call_id: call.id,
+                name: fn.name,
+                content: runTool(fn.name, parseArgs(fn.arguments))
+            });
+        });
+        return completeWithTools(origFetch, input, init, payload, hops + 1);
     }
     function interceptOutgoingChat() {
         if (window.fetch && window.fetch.__otStatusWrapped) return;
@@ -200,15 +184,11 @@
         window.fetch = function (input, init) {
             try {
                 var cfg = getCfg();
-                if (cfg.enabled && cfg.readBefore !== false && init && typeof init.body === 'string') {
+                if (cfg.enabled && cfg.modelLookup !== false && init && typeof init.body === 'string') {
                     var payload = JSON.parse(init.body);
                     if (looksLikeChatPayload(payload)) {
-                        var conv = typeof getActiveConv === 'function' ? getActiveConv() : null;
-                        var block = formatStatusPrompt(activeCharacter(conv), payload.messages);
-                        if (block) {
-                            payload.messages = injectBlockIntoMessages(payload.messages, block);
-                            init = Object.assign({}, init, { body: JSON.stringify(payload) });
-                        }
+                        payload = attachTools(payload);
+                        return completeWithTools(origFetch, input, init, payload, 0);
                     }
                 }
             } catch (e) {}
@@ -258,13 +238,12 @@
         box.innerHTML = '<div style="font-weight:600">Status Center</div>' +
             '<label style="display:block"><input type="checkbox" id="otStEnabled"> Enable</label>' +
             '<label style="display:block"><input type="checkbox" id="otStHide"> Hide tags in bubble</label>' +
-            '<label style="display:block"><input type="checkbox" id="otStRead"> Inject matching tables on send</label>' +
+            '<label style="display:block"><input type="checkbox" id="otStLook"> Model looks up tables (no dump on send)</label>' +
             '<label style="display:block"><input type="checkbox" id="otStCard"> Write to character card</label>' +
-            '<label style="display:block"><input type="checkbox" id="otStWorld"> Mirror to world book</label>' +
             '<div id="otStatusTableList"></div>';
         host.appendChild(box);
         function bind(id, key) { var el = document.getElementById(id); if (!el) return; el.checked = !!cfg[key]; el.addEventListener('change', function () { var p={}; p[key]=!!el.checked; setCfg(p); }); }
-        bind('otStEnabled','enabled'); bind('otStHide','hide'); bind('otStRead','readBefore'); bind('otStCard','writeCard'); bind('otStWorld','writeWorld');
+        bind('otStEnabled','enabled'); bind('otStHide','hide'); bind('otStLook','modelLookup'); bind('otStCard','writeCard');
         refreshPanel();
     }
     function boot() { installHooks(); injectPanel(); }
