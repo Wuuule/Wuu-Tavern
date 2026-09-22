@@ -1,20 +1,28 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Wuu-Tavern</title>
-  <style>html,body{margin:0;min-height:100%;background:#09090b;color:#e4e4e7;font-family:system-ui,sans-serif;}#boot{padding:24px;max-width:28rem;}</style>
+  <style>
+    html, body { margin: 0; height: 100%; background: #111; color: #eee; font-family: system-ui, sans-serif; }
+    #boot { padding: 24px; max-width: 32rem; line-height: 1.6; }
+    #boot a { color: #fbbf24; }
+    #app { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; display: none; }
+  </style>
 </head>
 <body>
-  <div id="boot">正在载入 OpenTavern + 状态中心…</div>
+  <div id="boot">Loading OpenTavern…</div>
+  <iframe id="app" title="OpenTavern" allow="clipboard-read; clipboard-write"></iframe>
   <script>
   (async function () {
     var boot = document.getElementById('boot');
-    var sources = ['https://opentavern.pages.dev/','https://hajimides.github.io/OpenTavern/'];
+    var frame = document.getElementById('app');
+    var sources = ['https://opentavern.pages.dev/', 'https://hajimides.github.io/OpenTavern/'];
+    var hook = new URL('ot-status.js', location.href).href;
     function patch(html) {
+      var tag = '<script src="' + hook + '"><\/script>\n';
       if (html.indexOf('ot-status.js') !== -1) return html;
-      var tag = '<script src="./ot-status.js"><\/script>\n';
       if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, tag + '</body>');
       return html + tag;
     }
@@ -24,11 +32,14 @@
         var res = await fetch(sources[i], { cache: 'no-cache', mode: 'cors' });
         if (!res.ok) throw new Error(sources[i] + ' HTTP ' + res.status);
         var html = await res.text();
-        if (html.indexOf('function persistState') === -1) throw new Error('不是 OpenTavern');
-        document.open(); document.write(patch(html)); document.close(); return;
+        if (html.indexOf('<html') === -1) throw new Error('not a full page');
+        frame.srcdoc = patch(html);
+        frame.style.display = 'block';
+        boot.style.display = 'none';
+        return;
       } catch (err) { lastErr = err; }
     }
-    boot.innerHTML = '无法加载。先打开 GitHub Pages 再刷新。<br><small>' + String(lastErr && lastErr.message || lastErr || '') + '</small>';
+    boot.innerHTML = '<p>Overlay failed. Open upstream:</p><p><a href="https://opentavern.pages.dev/">opentavern.pages.dev</a></p><p><small>' + String(lastErr && lastErr.message || lastErr || '') + '</small></p>';
   })();
   </script>
 </body>
