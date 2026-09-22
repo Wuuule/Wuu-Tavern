@@ -1,12 +1,12 @@
-/** OpenTavern Status Center */
+/** OpenTavern Status Center — platform overlay, no bundled scenario. */
 (function () {
     var SETTINGS_KEY = 'otStatusCenter';
     var MAX_TABLES = 50;
     var TABLE_RE = /<(?:StatusTable|OTTable|Ledger)\b([^>]*)>([\s\S]*?)<\/(?:StatusTable|OTTable|Ledger)>/gi;
     var OPEN_RE = /<(?:StatusTable|OTTable|Ledger)\b/i;
-    var BOOK_MARKER = '【状态表:';
+    var BOOK_MARKER = '[StatusTable:';
     function defaults() {
-        return { enabled: true, hide: true, readBefore: true, writeCard: true, writeWorld: true, writeNoteIndex: false };
+        return { enabled: true, hide: true, readBefore: true, writeCard: true, writeWorld: true };
     }
     function getCfg() {
         var base = defaults();
@@ -30,7 +30,7 @@
         var raw = attrStr || '';
         var m = raw.match(/\bname\s*=\s*["']([^"']+)["']/i) || raw.match(/\bid\s*=\s*["']([^"']+)["']/i);
         if (m && m[1]) return String(m[1]).trim().slice(0, 40);
-        return tagFallback || '未命名';
+        return tagFallback || 'untitled';
     }
     function parseTables(text) {
         var src = text == null ? '' : String(text);
@@ -39,7 +39,7 @@
             var full = m[0], attrs = m[1] || '', body = String(m[2] || '').trim();
             var tag = (full.match(/^<([A-Za-z]+)/) || [])[1] || 'OTTable';
             var name = attrName(attrs, tag === 'Ledger' ? 'Ledger' : '');
-            if (!name) name = '表' + (out.length + 1);
+            if (!name) name = 'table-' + (out.length + 1);
             if (!body) continue;
             if (body.length > 8000) body = body.slice(0, 8000);
             out.push({ name: name, content: body });
@@ -79,14 +79,14 @@
         if (!character || !tables.length) return false;
         var book = ensureCharacterBook(character);
         tables.forEach(function (table) {
-            var comment = BOOK_MARKER + table.name + '】';
+            var comment = BOOK_MARKER + table.name + ']';
             var hit = null;
             book.entries.forEach(function (e) { if (e && e.comment === comment) hit = e; });
             if (!hit) {
-                hit = { keys: [table.name, comment], secondary_keys: [], comment: comment, content: '', constant: true, enabled: true, insertion_order: 10, extensions: { position: 1 } };
+                hit = { keys: [table.name, comment], secondary_keys: [], comment: comment, content: '', constant: true, enabled: true, insertion_order: 10 };
                 book.entries.push(hit);
             }
-            hit.content = '状态表「' + table.name + '」\n' + table.content;
+            hit.content = 'Status table [' + table.name + ']\n' + table.content;
             hit.constant = true; hit.enabled = true; hit.disable = false;
         });
         return true;
@@ -95,22 +95,21 @@
         if (!conv || !tables.length || typeof createNewWorldBook !== 'function' || !window.state) return false;
         if (!state.worldBooks) state.worldBooks = {};
         var found = null;
-        Object.keys(state.worldBooks).forEach(function (id) { var wb = state.worldBooks[id]; if (wb && wb.name === 'OT状态中心') found = wb; });
-        if (!found) found = createNewWorldBook('OT状态中心');
+        Object.keys(state.worldBooks).forEach(function (id) { var wb = state.worldBooks[id]; if (wb && wb.name === 'OT Status Center') found = wb; });
+        if (!found) found = createNewWorldBook('OT Status Center');
         if (!found) return false;
         if (!Array.isArray(conv.worldBookIds)) conv.worldBookIds = [];
         if (conv.worldBookIds.indexOf(found.id) < 0) conv.worldBookIds.unshift(found.id);
         if (!found.entries || typeof found.entries !== 'object') found.entries = {};
         tables.forEach(function (table) {
-            var comment = BOOK_MARKER + table.name + '】';
+            var comment = BOOK_MARKER + table.name + ']';
             var hit = null;
             Object.keys(found.entries).forEach(function (uid) { var e = found.entries[uid]; if (e && e.comment === comment) hit = e; });
             if (!hit && typeof createDefaultWIEntry === 'function') { hit = createDefaultWIEntry(); found.entries[hit.uid] = hit; }
             else if (!hit) { var uid = Date.now(); hit = { uid: uid, comment: comment, key: [table.name], content: '', constant: true }; found.entries[uid] = hit; }
             hit.comment = comment; hit.key = [table.name];
-            hit.content = '状态表「' + table.name + '」\n' + table.content;
+            hit.content = 'Status table [' + table.name + ']\n' + table.content;
             hit.constant = true; hit.disable = false;
-            if (typeof WI_POS !== 'undefined') hit.position = WI_POS.AFTER_CHAR;
         });
         return true;
     }
@@ -132,10 +131,55 @@
         if (!character || !character.extensions) return [];
         return Array.isArray(character.extensions.otStatusTables) ? character.extensions.otStatusTables : [];
     }
-    function formatStatusPrompt(character) {
-        var tables = listTables(character); if (!tables.length) return '';
-        var lines = ['【状态中心·本轮必读】', '生成前先读这些已存表。禁止回到初见模板，禁止把已记录的绝对时间改成昨晚/后天。'];
-        tables.forEach(function (t) { lines.push('## ' + t.name); lines.push(String(t.content || '').trim()); });
+    function recentText(messages) {
+        if (!Array.isArray(messages)) return '';
+        var chunks = [];
+        for (var i = messages.length - 1, n = 0; i >= 0 && n < 6; i--) {
+            var c = messages[i] && messages[i].content;
+            if (typeof c === 'string' && c.trim()) { chunks.push(c); n++; }
+        }
+        return chunks.join('\n');
+    }
+    function tokensOf(text) {
+        var parts = String(text || '').toLowerCase().match(/[\u4e00-\u9fff]{2,}|[a-z0-9_]{3,}/g) || [];
+        var out = [];
+        parts.forEach(function (p) { if (out.indexOf(p) < 0) out.push(p); });
+        return out;
+    }
+    function scoreTable(table, tokens) {
+        var name = String(table.name || '');
+        var hay = (name + '\n' + table.content).toLowerCase();
+        var score = 0;
+        tokens.forEach(function (tok) {
+            if (name.toLowerCase().indexOf(tok) >= 0) score += 8;
+            else if (hay.indexOf(tok) >= 0) score += 2;
+        });
+        return score;
+    }
+    function pickRelevantTables(tables, messages) {
+        if (!tables.length) return [];
+        return tables.map(function (t) { return { t: t, score: scoreTable(t, tokensOf(recentText(messages))) }; })
+            .sort(function (a, b) { return b.score - a.score; })
+            .filter(function (x) { return x.score > 0; })
+            .slice(0, 5)
+            .map(function (x) { return x.t; });
+    }
+    function formatStatusPrompt(character, messages) {
+        var tables = listTables(character);
+        if (!tables.length) return '';
+        var picked = pickRelevantTables(tables, messages);
+        var lines = [
+            '[Status Center]',
+            'tables: ' + tables.map(function (t) { return t.name; }).join(', '),
+            'expanded below: only tables matching the current messages'
+        ];
+        if (!picked.length) return lines.join('\n');
+        picked.forEach(function (t) {
+            var body = String(t.content || '').trim();
+            if (body.length > 900) body = body.slice(0, 900) + '...';
+            lines.push('## ' + t.name);
+            lines.push(body);
+        });
         return lines.join('\n');
     }
     function looksLikeChatPayload(payload) {
@@ -144,7 +188,7 @@
     function injectBlockIntoMessages(messages, block) {
         if (!Array.isArray(messages) || !block) return messages;
         var joined = messages.map(function (m) { return m && m.content; }).join('\n');
-        if (joined.indexOf('【状态中心·本轮必读】') >= 0) return messages;
+        if (joined.indexOf('[Status Center]') >= 0) return messages;
         var copy = messages.slice();
         if (copy[0] && copy[0].role === 'system') copy[0] = Object.assign({}, copy[0], { content: block + '\n\n' + (copy[0].content || '') });
         else copy.unshift({ role: 'system', content: block });
@@ -160,7 +204,7 @@
                     var payload = JSON.parse(init.body);
                     if (looksLikeChatPayload(payload)) {
                         var conv = typeof getActiveConv === 'function' ? getActiveConv() : null;
-                        var block = formatStatusPrompt(activeCharacter(conv));
+                        var block = formatStatusPrompt(activeCharacter(conv), payload.messages);
                         if (block) {
                             payload.messages = injectBlockIntoMessages(payload.messages, block);
                             init = Object.assign({}, init, { body: JSON.stringify(payload) });
@@ -176,9 +220,9 @@
         var listEl = document.getElementById('otStatusTableList'); if (!listEl) return;
         var conv = typeof getActiveConv === 'function' ? getActiveConv() : null;
         var tables = listTables(activeCharacter(conv));
-        if (!tables.length) { listEl.textContent = '当前角色还没有状态表。'; return; }
+        if (!tables.length) { listEl.textContent = 'No tables on this character.'; return; }
         listEl.innerHTML = tables.map(function (t) {
-            return '<div style="margin:0 0 8px;padding:8px;border:1px solid rgba(255,255,255,.08);border-radius:8px;"><b>' + String(t.name).replace(/</g,'<') + '</b><div style="opacity:.75">' + String(t.content||'').replace(/\s+/g,' ').slice(0,80).replace(/</g,'<') + '</div></div>';
+            return '<div style="margin:0 0 8px;padding:8px;border:1px solid rgba(255,255,255,.08);border-radius:8px;"><b>' + String(t.name).replace(/</g,'<') + '</b></div>';
         }).join('');
     }
     function installHooks() {
@@ -198,7 +242,7 @@
             var origFinish = finishAssistantMessage;
             finishAssistantMessage = function (conv, fullContent) {
                 var result = origFinish.apply(this, arguments);
-                try { applyTables(conv, fullContent); } catch (err) { console.warn('[OT状态中心]', err); }
+                try { applyTables(conv, fullContent); } catch (err) { console.warn('[status-center]', err); }
                 return result;
             };
             finishAssistantMessage.__otStatusWrapped = true;
@@ -211,12 +255,12 @@
         var box = document.createElement('div');
         box.id = 'otStatusPanel';
         box.style.cssText = 'margin:10px 0 0;padding:10px;border:1px solid rgba(255,255,255,.08);border-radius:12px;font-size:12px;';
-        box.innerHTML = '<div style="font-weight:600">状态中心（通用）</div>' +
-            '<label style="display:block"><input type="checkbox" id="otStEnabled"> 启用</label>' +
-            '<label style="display:block"><input type="checkbox" id="otStHide"> 气泡藏表</label>' +
-            '<label style="display:block"><input type="checkbox" id="otStRead"> 每轮生成前读表</label>' +
-            '<label style="display:block"><input type="checkbox" id="otStCard"> 写入角色卡</label>' +
-            '<label style="display:block"><input type="checkbox" id="otStWorld"> 同步世界书</label>' +
+        box.innerHTML = '<div style="font-weight:600">Status Center</div>' +
+            '<label style="display:block"><input type="checkbox" id="otStEnabled"> Enable</label>' +
+            '<label style="display:block"><input type="checkbox" id="otStHide"> Hide tags in bubble</label>' +
+            '<label style="display:block"><input type="checkbox" id="otStRead"> Inject matching tables on send</label>' +
+            '<label style="display:block"><input type="checkbox" id="otStCard"> Write to character card</label>' +
+            '<label style="display:block"><input type="checkbox" id="otStWorld"> Mirror to world book</label>' +
             '<div id="otStatusTableList"></div>';
         host.appendChild(box);
         function bind(id, key) { var el = document.getElementById(id); if (!el) return; el.checked = !!cfg[key]; el.addEventListener('change', function () { var p={}; p[key]=!!el.checked; setCfg(p); }); }
