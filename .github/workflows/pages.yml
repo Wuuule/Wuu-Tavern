@@ -18,44 +18,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Fetch official OpenTavern files
+      - name: Brand and assemble
         run: |
-          mkdir -p dist
-          curl -fsSL https://opentavern.pages.dev/ -o dist/index.html
-          curl -fsSL https://opentavern.pages.dev/worker.js -o dist/worker.js
-          curl -fsSL https://opentavern.pages.dev/icon.png -o dist/icon.png
-          cp ot-status.js dist/ot-status.js
-          cp ot-boot.js dist/ot-boot.js
-          touch dist/.nojekyll
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('dist/index.html')
+          p = Path('index.html')
           raw = p.read_bytes()
-          if b'OpenTavern' not in raw:
-              raise SystemExit('upstream is not OpenTavern')
-          tag = b'\n<script src="./ot-boot.js"></script>\n<script src="./ot-status.js"></script>\n'
-          if b'src="./ot-boot.js"' not in raw:
-              raw = raw + tag
-          p.write_bytes(raw)
-          print('baked', p.stat().st_size)
+          text = raw.decode('utf-8', 'replace')
+          head, sep, rest = text.partition('</title>')
+          if sep:
+              start = head.rfind('<title>')
+              if start >= 0:
+                  text = head[:start] + '<title>Wuu-Tavern</title>' + rest
+          extra = '\n<script src="./ot-boot.js"></script>\n<script src="./ot-status.js"></script>\n'
+          if 'src="./ot-boot.js"' not in text:
+              text = text + extra
+          p.write_text(text, encoding='utf-8')
+          print('ready', p.stat().st_size)
           PY
-          cp dist/index.html index.html
-          cp dist/worker.js worker.js
-          cp dist/icon.png icon.png
+          mkdir -p dist
+          cp index.html worker.js icon.png ot-boot.js ot-status.js dist/
+          touch dist/.nojekyll
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
       - id: deployment
         uses: actions/deploy-pages@v4
-      - name: Push official files to main for branch Pages
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add index.html worker.js icon.png ot-status.js ot-boot.js .nojekyll
-          if git diff --staged --quiet; then
-            echo no change
-          else
-            git commit -m "chore: sync official OpenTavern files [skip ci]"
-            git push
-          fi
