@@ -1,23 +1,10 @@
-/** Status Center: IIFE-safe DOM observer. */
+/** Status Center. Observe chat only; never reenter. */
 (function () {
     var MAX = 50;
     var STORE = {};
+    var busy = false;
+    var lastPersist = 0;
     var TABLE_RE = /<(?:StatusTable|OTTable|Ledger)\b([^>]*)>([\s\S]*?)<\/(?:StatusTable|OTTable|Ledger)>/gi;
-    var PLAYER = ['{{user}}', 'User', 'user', '吴浚福'];
-    function playerNames() {
-        var n = PLAYER.slice();
-        try {
-            if (window.state && state.settings) {
-                if (state.settings.userName) n.push(String(state.settings.userName));
-                (state.settings.userPersonas || []).forEach(function (p) { if (p && p.userName) n.push(String(p.userName)); });
-            }
-        } catch (e) {}
-        return n;
-    }
-    function isPlayerRow(line) {
-        var head = String(line || '').split('|')[0].replace(/\s+/g, '').replace(/（.*$/, '');
-        return playerNames().some(function (x) { x = String(x).replace(/\s+/g, ''); return head === x || head.indexOf(x) === 0; });
-    }
     function explode(text) {
         var s = String(text || '');
         s = s.replace(/<br\s*\/?>/gi, '\n');
@@ -31,14 +18,10 @@
     }
     function looksLine(s) {
         s = String(s || '').trim();
-        if (!s) return false;
-        if (s.indexOf('|') >= 0) {
-            if (/^第\s*\d+\s*天/.test(s)) return true;
-            if (/已发生|预约|攻略|服从|未调教|未评定|见过|称呼|旧令|今日/.test(s)) return true;
-            if (s.split('|').length >= 3) return true;
-        }
-        if (/^第\s*\d+\s*天/.test(s) && s.indexOf('—') >= 0) return true;
-        return false;
+        if (!s || s.indexOf('|') < 0) return false;
+        if (/^第\s*\d+\s*天/.test(s)) return true;
+        if (/已发生|预约|攻略|服从|未调教|未评定|见过|称呼|旧令|今日/.test(s)) return true;
+        return s.split('|').length >= 3;
     }
     function parseTables(text) {
         var src = explode(text);
@@ -59,15 +42,13 @@
             if (/^时间表/.test(t)) { mode = '时间表'; seen = true; return; }
             if (/^完成表/.test(t)) { mode = '完成表'; seen = true; return; }
             if (/^状态表/.test(t)) { mode = '状态表'; seen = true; return; }
-            if (t === '无') return;
-            if (!looksLine(t)) return;
+            if (t === '无' || !looksLine(t)) return;
             seen = true;
             if (/已发生|今日|预约|坠入|虚空/.test(t) && buckets['时间表'].length === 0) mode = '时间表';
-            else if (/未评定|落地|办结/.test(t) && !/服从|未调教/.test(t)) mode = '完成表';
             else if (/服从|未调教|攻略|见过|称呼/.test(t) || t.split('|').length >= 4) mode = '状态表';
             else if (/^第\s*\d+\s*天/.test(t) && buckets['时间表'].length) mode = '完成表';
             if (!mode) mode = '状态表';
-            if (mode === '状态表' && isPlayerRow(t)) return;
+            if (mode === '状态表' && /吴浚福|^\{\{user\}\}/.test(t)) return;
             buckets[mode].push(t);
         });
         Object.keys(buckets).forEach(function (k) { if (buckets[k].length) out.push({ name: k, content: buckets[k].join('\n') }); });
@@ -105,60 +86,50 @@
         try {
             var conv = window.state && state.activeConversation;
             if (conv) conv.otStatusTables = upsert(conv.otStatusTables || [], tables);
-            var ch = conv && conv.character;
-            if (ch) { if (!ch.extensions) ch.extensions = {}; ch.extensions.otStatusTables = upsert(ch.extensions.otStatusTables || [], tables); }
         } catch (e) {}
-        try { if (typeof persistState === 'function') persistState(true); } catch (e2) {}
+        var now = Date.now();
+        if (now - lastPersist > 4000) {
+            lastPersist = now;
+            try { if (typeof persistState === 'function') persistState(true); } catch (e2) {}
+        }
         refreshPanel();
     }
     function listTables() {
-        var out = {}, conv, ch;
-        try { conv = window.state && state.activeConversation; ch = conv && conv.character; } catch (e) {}
-        [].concat((ch && ch.extensions && ch.extensions.otStatusTables) || [], (conv && conv.otStatusTables) || [], STORE.default || []).forEach(function (t) { if (t && t.name) out[t.name] = t; });
+        var out = {}, conv;
+        try { conv = window.state && state.activeConversation; } catch (e) {}
+        [].concat((conv && conv.otStatusTables) || [], STORE.default || []).forEach(function (t) { if (t && t.name) out[t.name] = t; });
         return Object.keys(out).map(function (k) { return out[k]; });
     }
-    function injectFetch() {
-        if (!window.fetch || window.fetch.__otStatusWrapped) return;
-        var orig = window.fetch;
-        window.fetch = function (input, init) {
-            try {
-                if (init && typeof init.body === 'string') {
-                    var payload = JSON.parse(init.body);
-                    if (payload && Array.isArray(payload.messages)) {
-                        var tables = listTables();
-                        var parts = ['【状态中心只读，禁止把表打进正文】'];
-                        if (!tables.length) parts.push('当前无表。');
-                        tables.forEach(function (t) { parts.push('<StatusTable name="' + t.name + '">\n' + t.content + '\n</StatusTable>'); });
-                        var msgs = payload.messages.slice();
-                        msgs.splice(Math.min(1, msgs.length), 0, { role: 'system', content: parts.join('\n').slice(0, 8000) });
-                        payload.messages = msgs;
-                        init = Object.assign({}, init, { body: JSON.stringify(payload) });
-                    }
-                }
-            } catch (e) {}
-            return orig.call(this, input, init);
-        };
-        window.fetch.__otStatusWrapped = true;
-    }
-    function nodeText(el) {
-        var html = el.innerHTML || '';
-        if (html) return explode(html);
-        return explode(el.innerText || el.textContent || '');
+    function hasMarker(text) {
+        var s = String(text || '');
+        return s.indexOf('|') >= 0 && (s.indexOf('第') >= 0 || s.indexOf('StatusTable') >= 0 || s.indexOf('服从') >= 0);
     }
     function scrubEl(el) {
-        if (!el || el.nodeType !== 1) return;
-        var text = nodeText(el);
-        if (!text || text.length < 8) return;
+        if (!el || el.getAttribute('data-ot-done') === '1') return;
+        var text = explode(el.innerHTML || el.innerText || '');
+        if (!hasMarker(text)) return;
         var tables = parseTables(text);
         if (tables.length) save(tables);
         var clean = stripTables(text);
-        if (clean !== text && clean.length < text.length) el.innerText = clean;
+        if (clean !== text && clean.length < text.length) {
+            busy = true;
+            el.innerText = clean;
+            busy = false;
+        }
+        el.setAttribute('data-ot-done', '1');
     }
-    function scrubAll() { document.querySelectorAll('.msg-assistant .msg-bubble').forEach(scrubEl); }
+    function scrubAll() {
+        if (busy) return;
+        var root = document.getElementById('messagesContainer');
+        if (!root) return;
+        root.querySelectorAll('.msg-assistant .msg-bubble').forEach(scrubEl);
+    }
     function watch() {
         if (window.__otStatusObs) return;
-        var obs = new MutationObserver(function () { scrubAll(); });
-        obs.observe(document.body, { childList: true, subtree: true, characterData: true });
+        var root = document.getElementById('messagesContainer') || document.getElementById('chat');
+        if (!root) return;
+        var obs = new MutationObserver(function () { if (!busy) setTimeout(scrubAll, 0); });
+        obs.observe(root, { childList: true, subtree: true });
         window.__otStatusObs = obs;
         scrubAll();
     }
@@ -198,14 +169,14 @@
         var btn = document.createElement('button');
         btn.id = 'otStatusFab'; btn.type = 'button'; btn.textContent = '状态中心';
         btn.style.cssText = 'position:fixed;right:12px;bottom:96px;z-index:2147483000;padding:8px 12px;border-radius:999px;border:1px solid rgba(0,0,0,.12);background:#fff7ee;color:#2b241c;font-size:13px;';
-        btn.onclick = function (e) { e.preventDefault(); ensureModal(); document.getElementById('otStatusModal').style.display = 'block'; refreshPanel(); };
+        btn.onclick = function (e) { e.preventDefault(); e.stopPropagation(); ensureModal(); document.getElementById('otStatusModal').style.display = 'block'; refreshPanel(); };
         document.body.appendChild(btn);
     }
     function boot() {
-        injectFetch(); injectFab(); ensureModal(); watch();
-        setInterval(function () { injectFab(); injectFetch(); scrubAll(); }, 1500);
+        injectFab(); ensureModal(); watch();
+        setInterval(function () { injectFab(); if (!window.__otStatusObs) watch(); }, 2000);
     }
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
     else boot();
-    window.addEventListener('load', function () { setTimeout(boot, 50); });
+    window.addEventListener('load', function () { setTimeout(boot, 80); });
 })();
