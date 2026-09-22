@@ -14352,6 +14352,255 @@ function getActiveConv() {
     return state.conversations[state.activeConvId];
 }
 
+
+// ==================== Status Center Runtime ====================
+var OT_STATUS_MAX_TABLES = 50;
+var OT_STATUS_MAX_TABLE_CHARS = 12000;
+var OT_STATUS_MAX_INJECT_CHARS = 16000;
+
+function ensureStatusCenter(conv) {
+    if (!conv) return { version: 2, tables: [] };
+    if (!conv.statusCenter || typeof conv.statusCenter !== 'object') {
+        conv.statusCenter = { version: 2, tables: [] };
+    }
+    conv.statusCenter.version = 2;
+    if (!Array.isArray(conv.statusCenter.tables)) conv.statusCenter.tables = [];
+
+    // One-time migration from the experimental external script.
+    if (Array.isArray(conv.otStatusTables) && conv.otStatusTables.length) {
+        conv.otStatusTables.forEach(function(t) {
+            if (!t || !String(t.name || '').trim()) return;
+            var name = String(t.name).trim().slice(0, 120);
+            var content = String(t.content || '').trim().slice(0, OT_STATUS_MAX_TABLE_CHARS);
+            var hit = conv.statusCenter.tables.find(function(x) { return x && x.name === name; });
+            if (!hit) {
+                conv.statusCenter.tables.push({
+                    name: name,
+                    content: content,
+                    updated: Number(t.updated) || Date.now(),
+                    revision: 1
+                });
+            }
+        });
+        try { delete conv.otStatusTables; } catch (_) {}
+    }
+
+    conv.statusCenter.tables = conv.statusCenter.tables.filter(function(t) {
+        return t && String(t.name || '').trim();
+    }).slice(-OT_STATUS_MAX_TABLES);
+    return conv.statusCenter;
+}
+
+function escapeStatusAttr(value) {
+    return String(value == null ? '' : value)
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+function unescapeStatusAttr(value) {
+    return String(value == null ? '' : value)
+        .replace(/&quot;/g, '"')
+        .replace(/&apos;/g, "'")
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&');
+}
+
+function readStatusTableName(attrs, fallback) {
+    attrs = String(attrs || '');
+    var m = attrs.match(/\bname\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+    var value = m ? (m[1] || m[2] || m[3] || '') : '';
+    value = unescapeStatusAttr(value).trim();
+    return value || fallback || '';
+}
+
+function parseStatusTablesFromBlock(block) {
+    var src = String(block || '');
+    var tables = [];
+    var re = /<(?:StatusTable|OTTable|Ledger)\b([^>]*)>([\s\S]*?)<\/(?:StatusTable|OTTable|Ledger)>/gi;
+    var m;
+    while ((m = re.exec(src))) {
+        var name = readStatusTableName(m[1], 'table-' + (tables.length + 1));
+        var content = String(m[2] || '').trim();
+        if (!name || !content) continue;
+        tables.push({
+            name: name.slice(0, 120),
+            content: content.slice(0, OT_STATUS_MAX_TABLE_CHARS)
+        });
+        if (tables.length >= OT_STATUS_MAX_TABLES) break;
+    }
+    return tables;
+}
+
+function stripStatusTransportForDisplay(text, allowPartial) {
+    var src = String(text == null ? '' : text);
+
+    // New v2 transport wrapper.
+    src = src.replace(/<OTStatusUpdate\b[^>]*>[\s\S]*?<\/OTStatusUpdate>/gi, '');
+
+    // Backward compatibility with standalone table blocks from older cards.
+    src = src.replace(/<(?:StatusTable|OTTable|Ledger)\b[^>]*>[\s\S]*?<\/(?:StatusTable|OTTable|Ledger)>/gi, '');
+
+    if (allowPartial) {
+        var cuts = [];
+        var a = src.search(/<OTStatusUpdate\b/i);
+        var b = src.search(/<(?:StatusTable|OTTable|Ledger)\b/i);
+        if (a >= 0) cuts.push(a);
+        if (b >= 0) cuts.push(b);
+        if (cuts.length) src = src.slice(0, Math.min.apply(Math, cuts));
+    }
+
+    return src.replace(/\n{3,}/g, '\n\n').trimEnd();
+}
+
+function consumeStatusCenterUpdate(conv, rawText) {
+    var src = String(rawText == null ? '' : rawText);
+    var updates = [];
+    var wrapperRe = /<OTStatusUpdate\b[^>]*>([\s\S]*?)<\/OTStatusUpdate>/gi;
+    var m;
+    while ((m = wrapperRe.exec(src))) {
+        updates = updates.concat(parseStatusTablesFromBlock(m[1]));
+    }
+
+    // Compatibility path for cards that still emit bare <StatusTable> blocks.
+    if (!updates.length) {
+        updates = parseStatusTablesFromBlock(src);
+    }
+
+    return {
+        visibleText: stripStatusTransportForDisplay(src, true),
+        updates: updates
+    };
+}
+
+function notifyStatusCenterUpdated(conv) {
+    try {
+        window.dispatchEvent(new CustomEvent('ot-status-center-updated', {
+            detail: { conversationId: conv && conv.id ? conv.id : null }
+        }));
+    } catch (_) {}
+}
+
+function applyStatusCenterUpdates(conv, updates) {
+    if (!conv || !Array.isArray(updates) || !updates.length) return false;
+    var center = ensureStatusCenter(conv);
+    var changed = false;
+
+    updates.forEach(function(update) {
+        if (!update) return;
+        var name = String(update.name || '').trim().slice(0, 120);
+        var content = String(update.content || '').trim().slice(0, OT_STATUS_MAX_TABLE_CHARS);
+        if (!name || !content) return;
+
+        var hit = center.tables.find(function(t) { return t && t.name === name; });
+        if (!hit) {
+            if (center.tables.length >= OT_STATUS_MAX_TABLES) {
+                center.tables.sort(function(a, b) {
+                    return (Number(a.updated) || 0) - (Number(b.updated) || 0);
+                });
+                center.tables.shift();
+            }
+            hit = { name: name, content: '', updated: 0, revision: 0 };
+            center.tables.push(hit);
+        }
+
+        if (hit.content !== content) {
+            hit.content = content;
+            hit.updated = Date.now();
+            hit.revision = (Number(hit.revision) || 0) + 1;
+            changed = true;
+        }
+    });
+
+    if (changed) {
+        conv.updated = Date.now();
+        notifyStatusCenterUpdated(conv);
+    }
+    return changed;
+}
+
+function getStatusCenterTables(conv) {
+    var center = ensureStatusCenter(conv);
+    return center.tables.map(function(t) {
+        return {
+            name: String(t.name || ''),
+            content: String(t.content || ''),
+            updated: Number(t.updated) || 0,
+            revision: Number(t.revision) || 0
+        };
+    });
+}
+
+function buildStatusCenterRuntimeMessage(conv) {
+    if (!conv) return '';
+    var tables = getStatusCenterTables(conv);
+    var parts = [];
+    var used = 0;
+
+    parts.push(
+        '【OpenTavern Status Center Runtime · READ/WRITE PROTOCOL】\n' +
+        '这是平台提供的持久化剧情状态层，不是故事正文。\n' +
+        '先阅读角色卡、角色描述、系统提示、Post-History Instructions 与已激活世界书中关于“状态/记忆/时间线/关系/任务/物品/地点”等追踪规则；这些内容定义业务表的表名、字段和更新方式。平台本身不规定业务字段。\n' +
+        '以下 CURRENT_STATUS_CENTER 是此前已经确认并持久化的事实。除非本轮剧情明确改变它，否则不得无故重置、倒退或改写。\n\n' +
+        '本轮输出规则：\n' +
+        '1. 正常输出故事正文；禁止在正文、选项、可见 HUD 中打印状态中心表。\n' +
+        '2. 每个主回复末尾必须输出且只输出一个 <OTStatusUpdate>...</OTStatusUpdate> 传输块；它不是给玩家看的。\n' +
+        '3. 每轮必须更新名为 "Scene Anchor" 的表：只记录当前时间/阶段、地点、在场人物、刚刚发生、当前悬点、必须保持的连续性；保持简洁。\n' +
+        '4. 角色卡/世界书若定义了其他状态追踪规则，按规则更新对应表；有变化的表输出“更新后的完整表”。没有定义业务表时不要自行发明，只维护 Scene Anchor。\n' +
+        '5. 完成/历史类表若内容规则要求只追加，则保留旧事实后追加；人物关系不得因再次见面自动重置。\n' +
+        '6. 相对预约应尽量同时保存绝对锚点（如第N天到期）与当前剩余量，避免“还剩5天”永久不变。\n' +
+        '7. 传输块格式：\n' +
+        '<OTStatusUpdate>\n' +
+        '<StatusTable name="Scene Anchor">...</StatusTable>\n' +
+        '<StatusTable name="由内容规则定义的表名">...</StatusTable>\n' +
+        '</OTStatusUpdate>\n'
+    );
+
+    if (!tables.length) {
+        parts.push('\n<CURRENT_STATUS_CENTER>\n(empty - initialize Scene Anchor this turn)\n</CURRENT_STATUS_CENTER>');
+        return parts.join('');
+    }
+
+    parts.push('\n<CURRENT_STATUS_CENTER>\n');
+    used = parts.join('').length;
+
+    tables.forEach(function(t) {
+        if (used >= OT_STATUS_MAX_INJECT_CHARS) return;
+        var block = '<StatusTable name="' + escapeStatusAttr(t.name) + '">\n' +
+            String(t.content || '') + '\n</StatusTable>\n';
+        var remain = OT_STATUS_MAX_INJECT_CHARS - used;
+        if (block.length > remain) block = block.slice(0, Math.max(0, remain));
+        if (block) {
+            parts.push(block);
+            used += block.length;
+        }
+    });
+    parts.push('</CURRENT_STATUS_CENTER>');
+    return parts.join('');
+}
+
+window.OpenTavernStatusCenterRuntime = {
+    version: 2,
+    listTables: function() {
+        var conv = getActiveConv();
+        return conv ? getStatusCenterTables(conv) : [];
+    },
+    getCurrentConversationId: function() {
+        var conv = getActiveConv();
+        return conv && conv.id ? conv.id : null;
+    },
+    getSnapshot: function() {
+        var conv = getActiveConv();
+        if (!conv) return null;
+        return {
+            conversationId: conv.id || null,
+            tables: getStatusCenterTables(conv)
+        };
+    }
+};
+
 // ==================== Translation DOM Updates ====================
 function applyTranslations() {
     // data-i18n — text content
@@ -18434,7 +18683,11 @@ function buildMessagesForAPI(generationType) {
 
     // 关键修复：必须深拷贝消息对象，防止后续 Outlet 替换污染原始 conv.messages
     var historyMessages = regularMsgs.map(function(m) {
-        var copy = { role: m.role, content: m.content };
+        var historyContent = m.content;
+        if (String(m.role || '').toLowerCase() === 'assistant') {
+            historyContent = stripStatusTransportForDisplay(historyContent, true);
+        }
+        var copy = { role: m.role, content: historyContent };
         if (String(m.role || '').toLowerCase() === 'user') {
             var images = getUserVisionAttachments(m);
             if (images.length) copy._userImages = images;
@@ -18560,6 +18813,11 @@ function buildMessagesForAPI(generationType) {
         if (m._userImages && m._userImages.length) message._userImages = m._userImages;
         return message;
     });
+
+    var statusCenterRuntimeMessage = buildStatusCenterRuntimeMessage(conv);
+    if (statusCenterRuntimeMessage) {
+        apiMessages.push({ role: 'system', content: statusCenterRuntimeMessage });
+    }
 
     persistSillyTavernMacroEnv(macroEnv);
     if (generationType !== 'continue' && preset && String(preset.assistantPrefill || '').trim()) {
@@ -23488,6 +23746,7 @@ function renderStreamingContent(streamingEl, fullContent, useAnim, options) {
 }
 
 function paintStreamingBubbleDom(fullContent, conv, label, fullCot, options, meta) {
+    fullContent = stripStatusTransportForDisplay(fullContent, true);
     var container = dom.messagesContainer;
     if (!container) return;
     meta = meta || {};
@@ -23600,6 +23859,10 @@ function updateStreamingBubble(fullContent, conv, label, fullCot, options, meta)
 }
 function finishAssistantMessage(conv, fullContent, speakerForMsg, stage, parentId, fullCot, usageMeta) {
     if (!conv || !fullContent) return null;
+    var statusCenterResult = stage === 'second'
+        ? { visibleText: stripStatusTransportForDisplay(fullContent, true), updates: [] }
+        : consumeStatusCenterUpdate(conv, fullContent);
+    fullContent = statusCenterResult.visibleText;
     var streamSnap = getStreamUiSnapshotForConv(conv);
     var streamGenerationId = streamSnap && streamSnap.generationId;
     var pending = conv._pendingResponseRegeneration;
@@ -23617,6 +23880,9 @@ function finishAssistantMessage(conv, fullContent, speakerForMsg, stage, parentI
     // Completed message replaces any in-progress draft.
     if (pushObj.incomplete) delete pushObj.incomplete;
     conv.messages.push(pushObj);
+    if (stage !== 'second' && statusCenterResult && statusCenterResult.updates && statusCenterResult.updates.length) {
+        applyStatusCenterUpdates(conv, statusCenterResult.updates);
+    }
     if (conv.mvu || /<(?:UpdateVariable|JSONPatch|json_patch|initvar)\b/i.test(fullContent)) {
         const alreadyInitialized = !!conv.mvu;
         initializeMvuConversation(conv, false);
@@ -34618,8 +34884,14 @@ function continueMessage(actualIdx) {
                 var streamSnap = getStreamUiSnapshotForConv(conv);
                 delete conv._continueHideMsgId;
 
-                // Abort with no tokens keeps the original text
-                var continued = fullContent ? (prefix + fullContent) : prefix;
+                // Abort with no tokens keeps the original text. Parse only the newly generated segment.
+                var continueStatusResult = fullContent
+                    ? consumeStatusCenterUpdate(conv, fullContent)
+                    : { visibleText: '', updates: [] };
+                if (continueStatusResult.updates && continueStatusResult.updates.length) {
+                    applyStatusCenterUpdates(conv, continueStatusResult.updates);
+                }
+                var continued = fullContent ? (prefix + continueStatusResult.visibleText) : prefix;
                 msg.content = continued;
                 if (fullCot) msg.cot = fullCot;
                 if (msg.incomplete) delete msg.incomplete;
