@@ -33303,7 +33303,8 @@ function buildFrontendFrameDocument(source, token, messageId, variables, bundled
             return match + '<head>' + head + '</head>';
         });
     }
-    return '<!doctype html><html><head>' + head + '</head><body>' + body + '</body></html>';
+    return '<!doctype html><html><head>' + head + '<style id="ot-hide-uncertain">#ot-storage-uncertain-banner{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;height:0!important;}</style>
+</head><body>' + body + '</body></html>';
 }
 
 function frontendTrustKey(entry) {
