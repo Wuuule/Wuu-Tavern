@@ -1,26 +1,16 @@
 # Wuu-Tavern
 
-OpenTavern overlay. Adds two platform features:
+OpenTavern overlay. Platform features only.
 
-- Hide tagged blocks in the chat bubble
-- Status Center: up to 50 named tables per character card
+- Hide `<StatusTable>` / `<OTTable>` / `<Ledger>` in the bubble
+- Status Center on the character card (max 50 tables)
 
-No scenario content ships in this repo.
+Outgoing chat requests do **not** include table bodies.
+The model looks tables up with tools before it writes:
 
-## Status tags
-
-```text
-<StatusTable name="table-name">
-text
-</StatusTable>
-```
-
-Also accepted: `<OTTable name="...">` and `<Ledger>`.
-
-On send, only tables that match the current messages are injected. Other tables are listed by name only.
+- `status_list` — names only
+- `status_get` — read tables by exact name
 
 ## Pages
 
-1. https://github.com/Wuuule/Wuu-Tavern/settings/pages
-2. Source: GitHub Actions, or branch `main` / root
-3. https://wuuule.github.io/Wuu-Tavern/
+https://wuuule.github.io/Wuu-Tavern/
