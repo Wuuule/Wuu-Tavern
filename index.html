@@ -3,26 +3,18 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="mobile-web-app-capable" content="yes">
   <title>Wuu-Tavern</title>
-  <style>
-    html, body { margin: 0; min-height: 100%; background: #09090b; color: #e4e4e7; font-family: system-ui, sans-serif; }
-    #boot { padding: 24px; max-width: 28rem; }
-    #boot a { color: #fbbf24; }
-  </style>
+  <style>html,body{margin:0;min-height:100%;background:#09090b;color:#e4e4e7;font-family:system-ui,sans-serif;}#boot{padding:24px;max-width:28rem;}</style>
 </head>
 <body>
-  <div id="boot">正在载入 Wuu-Tavern…</div>
+  <div id="boot">正在载入 OpenTavern + 状态中心…</div>
   <script>
   (async function () {
     var boot = document.getElementById('boot');
-    var sources = [
-      'https://opentavern.pages.dev/',
-      'https://hajimides.github.io/OpenTavern/'
-    ];
+    var sources = ['https://opentavern.pages.dev/','https://hajimides.github.io/OpenTavern/'];
     function patch(html) {
-      if (html.indexOf('wuu-ledger.js') !== -1) return html;
-      var tag = '<script src="./wuu-ledger.js"><\/script>\n';
+      if (html.indexOf('ot-status.js') !== -1) return html;
+      var tag = '<script src="./ot-status.js"><\/script>\n';
       if (/<\/body>/i.test(html)) return html.replace(/<\/body>/i, tag + '</body>');
       return html + tag;
     }
@@ -32,19 +24,11 @@
         var res = await fetch(sources[i], { cache: 'no-cache', mode: 'cors' });
         if (!res.ok) throw new Error(sources[i] + ' HTTP ' + res.status);
         var html = await res.text();
-        if (html.indexOf('appendFinalAssistantMessage') === -1 && html.indexOf('function persistState') === -1) {
-          throw new Error(sources[i] + ' 不像 OpenTavern 页面');
-        }
-        document.open();
-        document.write(patch(html));
-        document.close();
-        return;
-      } catch (err) {
-        lastErr = err;
-      }
+        if (html.indexOf('function persistState') === -1) throw new Error('不是 OpenTavern');
+        document.open(); document.write(patch(html)); document.close(); return;
+      } catch (err) { lastErr = err; }
     }
-    boot.innerHTML = '无法加载 OpenTavern 前端。<br>请用 Safari 直接打开本页，或稍后重试。<br><small>' +
-      String(lastErr && lastErr.message || lastErr || '') + '</small>';
+    boot.innerHTML = '无法加载。先打开 GitHub Pages 再刷新。<br><small>' + String(lastErr && lastErr.message || lastErr || '') + '</small>';
   })();
   </script>
 </body>
