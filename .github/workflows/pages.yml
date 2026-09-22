@@ -33,6 +33,13 @@ jobs:
           html = p.read_text(encoding='utf-8', errors='replace')
           if 'OpenTavern' not in html:
               raise SystemExit('upstream is not OpenTavern')
+          css = '<style id="ot-hide-uncertain">#ot-storage-uncertain-banner{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;height:0!important;}</style>\n'
+          if 'ot-hide-uncertain' not in html:
+              h = html.lower().rfind('</head>')
+              if h >= 0:
+                  html = html[:h] + css + html[h:]
+              else:
+                  html = css + html
           tag = '<script src="./ot-boot.js"></script>\n<script src="./ot-status.js"></script>\n'
           if 'src="./ot-boot.js"' not in html:
               idx = html.lower().rfind('</body>')
