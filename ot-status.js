@@ -1,4 +1,4 @@
-/** Status Center. Observe chat only; never reenter. */
+/** Generic Status Center. Not tied to any one character card. */
 (function () {
     var MAX = 50;
     var STORE = {};
@@ -11,17 +11,37 @@
         s = s.replace(/<\/p>/gi, '\n');
         s = s.replace(/<\/div>/gi, '\n');
         s = s.replace(/<[^>]+>/g, '');
-        s = s.split('第').join('\n第');
-        s = s.split('沈秋 |').join('\n沈秋 |');
-        s = s.split('蔡丽 |').join('\n蔡丽 |');
+        s = s.replace(/\]\s*(第)/g, ']\n$1');
+        s = s.split('[状态').join('\n[状态');
         return s;
     }
-    function looksLine(s) {
+    function isHud(s) {
         s = String(s || '').trim();
-        if (!s || s.indexOf('|') < 0) return false;
-        if (/^第\s*\d+\s*天/.test(s)) return true;
-        if (/已发生|预约|攻略|服从|未调教|未评定|见过|称呼|旧令|今日/.test(s)) return true;
-        return s.split('|').length >= 3;
+        return /^\[状态/.test(s) || /烙印力|调教师阶|地点安保|与对象风评/.test(s);
+    }
+    function isTimeRow(s) {
+        s = String(s || '').trim();
+        if (!/^第\s*\d+\s*天/.test(s)) return false;
+        return /今日|已发生|预约|时辰/.test(s) || (s.indexOf('|') >= 0 && /早|午|傍晚|夜/.test(s));
+    }
+    function isPersonRow(s) {
+        s = String(s || '').trim();
+        if (!s || isHud(s) || /^第\s*\d+\s*天/.test(s) || /^时间表|^完成表|^状态表/.test(s)) return false;
+        if (s.indexOf('|') < 0) return false;
+        var head = s.split('|')[0].replace(/\s+/g, '');
+        if (!head || head.length > 16) return false;
+        if (/今日|预约|烙印|调教师|地点安保|日期/.test(head)) return false;
+        try { if (window.state && state.settings && state.settings.userName && head.indexOf(String(state.settings.userName).replace(/\s+/g,'')) === 0) return false; } catch (e) {}
+        if (/^吴浚福|^{{user}}|^User$/i.test(head)) return false;
+        return /服从|未调教|见过|初见|称呼|攻略|审视|未收徒|态度/.test(s) || s.split('|').length >= 3;
+    }
+    function looksStrip(s) {
+        s = String(s || '').trim();
+        if (!s) return false;
+        if (isHud(s) || isTimeRow(s) || isPersonRow(s)) return true;
+        if (/^时间表|^完成表|^状态表/.test(s)) return true;
+        if (/^第\s*\d+\s*天/.test(s) && s.indexOf('|') >= 0) return true;
+        return false;
     }
     function parseTables(text) {
         var src = explode(text);
@@ -35,40 +55,27 @@
         }
         if (out.length) return out;
         var buckets = { '时间表': [], '完成表': [], '状态表': [] };
-        var mode = null;
-        var seen = false;
         src.split('\n').forEach(function (raw) {
             var t = raw.trim();
-            if (/^时间表/.test(t)) { mode = '时间表'; seen = true; return; }
-            if (/^完成表/.test(t)) { mode = '完成表'; seen = true; return; }
-            if (/^状态表/.test(t)) { mode = '状态表'; seen = true; return; }
-            if (t === '无' || !looksLine(t)) return;
-            seen = true;
-            if (/已发生|今日|预约|坠入|虚空/.test(t) && buckets['时间表'].length === 0) mode = '时间表';
-            else if (/服从|未调教|攻略|见过|称呼/.test(t) || t.split('|').length >= 4) mode = '状态表';
-            else if (/^第\s*\d+\s*天/.test(t) && buckets['时间表'].length) mode = '完成表';
-            if (!mode) mode = '状态表';
-            if (mode === '状态表' && /吴浚福|^\{\{user\}\}/.test(t)) return;
-            buckets[mode].push(t);
+            if (!t || t === '无') return;
+            if (/^时间表/.test(t) || /^完成表/.test(t) || /^状态表/.test(t)) return;
+            if (isHud(t)) return;
+            if (isTimeRow(t)) { buckets['时间表'].push(t); return; }
+            if (isPersonRow(t)) { buckets['状态表'].push(t); return; }
+            if (/^第\s*\d+\s*天/.test(t) && t.indexOf('|') >= 0) { buckets['完成表'].push(t); return; }
         });
         Object.keys(buckets).forEach(function (k) { if (buckets[k].length) out.push({ name: k, content: buckets[k].join('\n') }); });
-        return seen ? out : [];
+        return out;
     }
     function stripTables(text) {
         var src = explode(String(text || '')).replace(TABLE_RE, '');
-        var lines = src.split('\n');
-        var cut = -1;
-        var i;
-        for (i = 0; i < lines.length; i++) { if (looksLine(lines[i])) { cut = i; break; } }
-        if (cut < 0) return src.replace(/\n{3,}/g, '\n\n').trimEnd();
-        var all = true;
-        for (i = cut; i < lines.length; i++) {
-            var u = lines[i].trim();
-            if (!u || u === '无') continue;
-            if (!looksLine(u) && !/^时间表|^完成表|^状态表|^\[状态/.test(u)) { all = false; break; }
-        }
-        if (all) src = lines.slice(0, cut).join('\n');
-        return src.replace(/\n{3,}/g, '\n\n').trimEnd();
+        var lines = src.split('\n').filter(function (l) {
+            var t = l.trim();
+            if (!t) return true;
+            if (t === '无') return false;
+            return !looksStrip(t);
+        });
+        return lines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd();
     }
     function upsert(store, tables) {
         store = Array.isArray(store) ? store : [];
@@ -83,15 +90,9 @@
     function save(tables) {
         if (!tables.length) return;
         STORE.default = upsert(STORE.default || [], tables);
-        try {
-            var conv = window.state && state.activeConversation;
-            if (conv) conv.otStatusTables = upsert(conv.otStatusTables || [], tables);
-        } catch (e) {}
+        try { var conv = window.state && state.activeConversation; if (conv) conv.otStatusTables = upsert(conv.otStatusTables || [], tables); } catch (e) {}
         var now = Date.now();
-        if (now - lastPersist > 4000) {
-            lastPersist = now;
-            try { if (typeof persistState === 'function') persistState(true); } catch (e2) {}
-        }
+        if (now - lastPersist > 4000) { lastPersist = now; try { if (typeof persistState === 'function') persistState(true); } catch (e2) {} }
         refreshPanel();
     }
     function listTables() {
@@ -100,22 +101,13 @@
         [].concat((conv && conv.otStatusTables) || [], STORE.default || []).forEach(function (t) { if (t && t.name) out[t.name] = t; });
         return Object.keys(out).map(function (k) { return out[k]; });
     }
-    function hasMarker(text) {
-        var s = String(text || '');
-        return s.indexOf('|') >= 0 && (s.indexOf('第') >= 0 || s.indexOf('StatusTable') >= 0 || s.indexOf('服从') >= 0);
-    }
     function scrubEl(el) {
         if (!el || el.getAttribute('data-ot-done') === '1') return;
         var text = explode(el.innerHTML || el.innerText || '');
-        if (!hasMarker(text)) return;
         var tables = parseTables(text);
         if (tables.length) save(tables);
         var clean = stripTables(text);
-        if (clean !== text && clean.length < text.length) {
-            busy = true;
-            el.innerText = clean;
-            busy = false;
-        }
+        if (clean.length < text.length) { busy = true; el.innerText = clean; busy = false; }
         el.setAttribute('data-ot-done', '1');
     }
     function scrubAll() {
