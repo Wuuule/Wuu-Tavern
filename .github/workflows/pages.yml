@@ -34,19 +34,21 @@ jobs:
           if 'OpenTavern' not in html:
               raise SystemExit('upstream is not OpenTavern')
           css = '<style id="ot-hide-uncertain">#ot-storage-uncertain-banner{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;height:0!important;}</style>\n'
-          if 'ot-hide-uncertain' not in html:
-              h = html.lower().rfind('</head>')
-              if h >= 0:
-                  html = html[:h] + css + html[h:]
-              else:
-                  html = css + html
-          tag = '<script src="./ot-boot.js"></script>\n<script src="./ot-status.js"></script>\n'
-          if 'src="./ot-boot.js"' not in html:
-              idx = html.lower().rfind('</body>')
-              if idx >= 0:
-                  html = html[:idx] + tag + html[idx:]
-              else:
-                  html += tag
+          scripts = '<script src="./ot-boot.js"></script>\n<script src="./ot-status.js"></script>\n'
+          head = html[:24000]
+          rest = html[24000:]
+          if 'ot-hide-uncertain' not in head:
+              i = head.lower().rfind('</head>')
+              if i < 0:
+                  raise SystemExit('no </head> in first 24k')
+              html = head[:i] + css + head[i:] + rest
+          tail = html[-8000:]
+          body = html[:-8000]
+          if 'src="./ot-boot.js"' not in tail:
+              j = tail.lower().rfind('</body>')
+              if j < 0:
+                  raise SystemExit('no </body> in last 8k')
+              html = body + tail[:j] + scripts + tail[j:]
           p.write_text(html, encoding='utf-8')
           print('baked', p.stat().st_size)
           PY
