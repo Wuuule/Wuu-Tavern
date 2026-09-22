@@ -1,10 +1,11 @@
-/** Wuu-Tavern Status Center: store tables off-bubble, inject for the model, never print. */
+/** Wuu-Tavern Status Center — tables live here, not in the chat bubble. */
 (function () {
     var SETTINGS_KEY = 'otStatusCenter';
     var MAX_TABLES = 50;
     var TABLE_RE = /<(?:StatusTable|OTTable|Ledger)\b([^>]*)>([\s\S]*?)<\/(?:StatusTable|OTTable|Ledger)>/gi;
     var OPEN_RE = /<(?:StatusTable|OTTable|Ledger)\b/i;
-    var USER_ALIASES = ['{{user}}', '{{User}}', 'User', 'user', '\u5434\u6d5a\u798f'];
+    var HEAD_RE = /(?:^|\n)\s*(时间表|完成表|状态表)\s*[:：]?\s*(?:\n|$)/;
+    var PLAYER = ['{{user}}', '{{User}}', 'User', 'user', '吴浚福'];
 
     function defaults() {
         return { enabled: true, hide: true, modelLookup: true, writeCard: true };
@@ -17,20 +18,12 @@
         } catch (e) {}
         return base;
     }
-    function setCfg(patch) {
-        if (!window.state) return;
-        if (!state.settings) state.settings = {};
-        state.settings[SETTINGS_KEY] = Object.assign(getCfg(), patch || {});
-        if (typeof persistState === 'function') persistState(true);
-    }
     function playerNames() {
-        var names = USER_ALIASES.slice();
+        var names = PLAYER.slice();
         try {
             if (state && state.settings && state.settings.userName) names.push(String(state.settings.userName));
-            var personas = state.settings.userPersonas || [];
-            personas.forEach(function (p) {
+            (state.settings.userPersonas || []).forEach(function (p) {
                 if (p && p.userName) names.push(String(p.userName));
-                if (p && p.title) names.push(String(p.title));
             });
         } catch (e) {}
         return names.filter(Boolean);
@@ -39,11 +32,9 @@
         var first = String(line || '').split('|')[0].replace(/\s+/g, '');
         if (!first) return false;
         return playerNames().some(function (n) {
-            return first === String(n).replace(/\s+/g, '') || first.indexOf(String(n).replace(/\s+/g, '')) === 0;
+            var x = String(n).replace(/\s+/g, '');
+            return first === x || first.indexOf(x) === 0;
         });
-    }
-    function dropPlayerRows(body) {
-        return String(body || '').split('\n').filter(function (line) { return !isPlayerRow(line); }).join('\n').replace(/\n{3,}/g, '\n\n').trim();
     }
     function attrName(attrStr, fallback) {
         var raw = attrStr || '';
@@ -51,45 +42,42 @@
         if (m && m[1]) return String(m[1]).trim().slice(0, 40);
         return fallback || 'untitled';
     }
+    function looksLikeTableLine(line) {
+        var s = String(line || '').trim();
+        if (!s || s.indexOf('|') < 0) return false;
+        if (/^第\s*\d+\s*天/.test(s)) return true;
+        if (/攻略|服从|见过|称呼|旧令|预约|今日/.test(s)) return true;
+        return s.split('|').length >= 3;
+    }
     function parseTagged(text) {
-        var src = text == null ? '' : String(text);
+        var src = String(text || '');
         var out = [];
         var re = new RegExp(TABLE_RE.source, 'gi');
         var m;
         while ((m = re.exec(src))) {
             var name = attrName(m[1], 'table-' + (out.length + 1));
-            var body = dropPlayerRows(m[2]);
+            var body = String(m[2] || '').split('\n').filter(function (l) { return !isPlayerRow(l); }).join('\n').trim();
             if (body) out.push({ name: name, content: body.slice(0, 12000) });
         }
         return out;
     }
-    function looksLikeTableLine(line) {
-        var s = String(line || '').trim();
-        if (!s || s.indexOf('|') < 0) return false;
-        if (/^\u7b2c\s*\d+\s*\u5929/.test(s)) return true;
-        if (/\u653b\u7565|\u670d\u4ece|\u89c1\u8fc7|\u79f0\u547c|\u65e7\u4ee4|\u9884\u7ea6|\u4eca\u65e5/.test(s)) return true;
-        return s.split('|').length >= 3;
-    }
     function parsePlainBlocks(text) {
-        var src = String(text || '');
-        var lines = src.split(/\n/);
-        var buckets = { '\u65f6\u95f4\u8868': [], '\u5b8c\u6210\u8868': [], '\u72b6\u6001\u8868': [] };
+        var lines = String(text || '').split('\n');
+        var buckets = { '时间表': [], '完成表': [], '状态表': [] };
         var mode = null;
-        var started = false;
         for (var i = 0; i < lines.length; i++) {
             var t = lines[i].trim();
-            if (/^\u65f6\u95f4\u8868/.test(t)) { mode = '\u65f6\u95f4\u8868'; started = true; continue; }
-            if (/^\u5b8c\u6210\u8868/.test(t)) { mode = '\u5b8c\u6210\u8868'; started = true; continue; }
-            if (/^\u72b6\u6001\u8868/.test(t)) { mode = '\u72b6\u6001\u8868'; started = true; continue; }
-            if (/^\[\u72b6\u6001[:\uff1a]/.test(t)) { started = true; continue; }
-            if (!started && !looksLikeTableLine(t)) continue;
-            started = true;
-            if (!looksLikeTableLine(t)) continue;
-            if (isPlayerRow(t)) continue;
-            if (/\u4eca\u65e5|\u9884\u7ea6/.test(t)) mode = '\u65f6\u95f4\u8868';
-            else if (/\u653b\u7565|\u670d\u4ece|\u89c1\u8fc7\d|\u79f0\u547c/.test(t)) mode = '\u72b6\u6001\u8868';
-            else if (/^\u7b2c\s*\d+\s*\u5929/.test(t) && t.split('|').length >= 3 && !/\u4eca\u65e5|\u9884\u7ea6/.test(t)) mode = mode === '\u65f6\u95f4\u8868' ? '\u5b8c\u6210\u8868' : (mode || '\u5b8c\u6210\u8868');
-            if (!mode) mode = '\u72b6\u6001\u8868';
+            if (/^时间表/.test(t)) { mode = '时间表'; continue; }
+            if (/^完成表/.test(t)) { mode = '完成表'; continue; }
+            if (/^状态表/.test(t)) { mode = '状态表'; continue; }
+            if (/^\[状态[:：]/.test(t)) continue;
+            if (!looksLikeTableLine(t) || isPlayerRow(t)) continue;
+            if (/今日|预约/.test(t)) mode = '时间表';
+            else if (/攻略|服从|见过|称呼/.test(t)) mode = '状态表';
+            else if (/^第\s*\d+\s*天/.test(t) && t.split('|').length >= 3 && !/今日|预约/.test(t)) {
+                mode = mode === '时间表' ? '完成表' : (mode || '完成表');
+            }
+            if (!mode) mode = '状态表';
             buckets[mode].push(t);
         }
         var out = [];
@@ -100,25 +88,7 @@
     }
     function parseTables(text) {
         var tagged = parseTagged(text);
-        if (tagged.length) return tagged;
-        return parsePlainBlocks(text);
-    }
-    function stripCutIndex(src) {
-        var s = String(src || '');
-        var idx = s.search(OPEN_RE);
-        var m = s.search(/\n\s*(?:\u65f6\u95f4\u8868|\u5b8c\u6210\u8868|\u72b6\u6001\u8868)\s*[:\uff1a]?\s*\n/);
-        var bar = s.search(/\n\s*\[\u72b6\u6001[:\uff1a][^\]]+\]\s*\n/);
-        var candidates = [idx, m, bar].filter(function (n) { return n >= 0; });
-        if (!candidates.length) {
-            var lines = s.split('\n');
-            for (var i = 0; i < lines.length; i++) {
-                if (looksLikeTableLine(lines[i]) && (/\u4eca\u65e5|\u9884\u7ea6|\u653b\u7565|\u670d\u4ece/.test(lines[i]) || /^\u7b2c\s*\d+\s*\u5929/.test(lines[i].trim()))) {
-                    return lines.slice(0, i).join('\n').length;
-                }
-            }
-            return -1;
-        }
-        return Math.min.apply(null, candidates);
+        return tagged.length ? tagged : parsePlainBlocks(text);
     }
     function stripTables(text, allowPartial) {
         var src = text == null ? '' : String(text);
@@ -128,21 +98,42 @@
             var open = src.search(OPEN_RE);
             if (open >= 0) src = src.slice(0, open);
         }
-        var cut = stripCutIndex(src);
-        if (cut >= 0) src = src.slice(0, cut);
+        var head = src.search(HEAD_RE);
+        if (head >= 0) src = src.slice(0, head);
+        var lines = src.split('\n');
+        var cut = -1;
+        for (var i = 0; i < lines.length; i++) {
+            var t = lines[i].trim();
+            if (looksLikeTableLine(t) && /今日|预约|攻略|服从|见过\d|称呼|旧令/.test(t)) {
+                cut = i;
+                break;
+            }
+        }
+        if (cut >= 0) {
+            var allTable = true;
+            for (var j = cut; j < lines.length; j++) {
+                var u = lines[j].trim();
+                if (!u) continue;
+                if (!looksLikeTableLine(u) && !/^时间表|^完成表|^状态表|^\[状态/.test(u)) {
+                    allTable = false;
+                    break;
+                }
+            }
+            if (allTable) src = lines.slice(0, cut).join('\n');
+        }
         return src.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+\n/g, '\n').trimEnd();
     }
     function activeCharacter(conv) {
         if (!conv) return null;
-        try { if (typeof isGroupChat === 'function' && isGroupChat(conv)) return null; } catch (e) {}
         if (conv.character) return conv.character;
-        try { if (window.state && state.characters && conv.characterId) return state.characters[conv.characterId] || null; } catch (e2) {}
+        try {
+            if (window.state && state.characters && conv.characterId) return state.characters[conv.characterId] || null;
+        } catch (e) {}
         return null;
     }
     function listTables(character) {
-        if (!character) return [];
-        if (!character.extensions || typeof character.extensions !== 'object') return [];
-        return Array.isArray(character.extensions.otStatusTables) ? character.extensions.otStatusTables : [];
+        if (!character || !character.extensions || !Array.isArray(character.extensions.otStatusTables)) return [];
+        return character.extensions.otStatusTables;
     }
     function upsertTablesOnCard(character, tables) {
         if (!character.extensions || typeof character.extensions !== 'object') character.extensions = {};
@@ -161,13 +152,26 @@
         });
         return store;
     }
+    function sanitizeConv(conv, raw) {
+        if (!conv || !Array.isArray(conv.messages)) return;
+        var clean = stripTables(raw, false);
+        for (var i = conv.messages.length - 1; i >= 0; i--) {
+            var m = conv.messages[i];
+            if (!m) continue;
+            if (m.role === 'assistant' || m.is_user === false) {
+                if (typeof m.content === 'string') m.content = stripTables(m.content, false);
+                if (clean && m.content && m.content.length > clean.length + 20) m.content = clean;
+                break;
+            }
+        }
+    }
     function applyTables(conv, fullContent) {
         var cfg = getCfg();
         if (!cfg.enabled) return;
         var tables = parseTables(fullContent);
-        if (!tables.length) return;
         var character = activeCharacter(conv);
-        if (cfg.writeCard && character) upsertTablesOnCard(character, tables);
+        if (tables.length && cfg.writeCard && character) upsertTablesOnCard(character, tables);
+        sanitizeConv(conv, fullContent);
         try { if (conv) conv.updated = Date.now(); } catch (e) {}
         try { if (typeof persistState === 'function') persistState(true); } catch (e2) {}
         refreshPanel();
@@ -175,14 +179,16 @@
     function statusSystemBlock() {
         var conv = typeof getActiveConv === 'function' ? getActiveConv() : null;
         var tables = listTables(activeCharacter(conv));
-        if (!tables.length) return '\u3010\u72b6\u6001\u4e2d\u5fc3\u3011\u5f53\u524d\u65e0\u8868\u3002\u4e0d\u8981\u628a\u73a9\u5bb6\u672c\u4eba\u5199\u5165\u72b6\u6001\u8868\u3002\u8868\u53ea\u5199\u5728\u6807\u7b7e\u91cc\uff0c\u7981\u6b62\u5728\u6b63\u6587\u6253\u5370\u8868\u3002';
-        var parts = ['\u3010\u72b6\u6001\u4e2d\u5fc3\u00b7\u53ea\u8bfb\u00b7\u7981\u6b62\u5728\u6b63\u6587\u590d\u8ff0\u6216\u6253\u5370\u3011'];
-        tables.forEach(function (t) {
-            parts.push('<StatusTable name="' + t.name + '">\n' + t.content + '\n</StatusTable>');
-        });
-        parts.push('\u6839\u636e\u4e0a\u8868\u63a5\u7eed\u65e5\u671f\u4e0e\u5173\u7cfb\u3002\u4e0d\u8981\u628a\u73a9\u5bb6\u5199\u5165\u72b6\u6001\u8868\u3002\u66f4\u65b0\u65f6\u4ecd\u7528\u6807\u7b7e\uff0c\u6b63\u6587\u91cc\u4e0d\u8981\u51fa\u73b0\u8868\u3002');
+        var parts = ['【状态中心·只读·禁止在正文复述或打印】玩家本人不要写入状态表。更新只用末尾隐藏标签，正文里不要出现表。'];
+        if (!tables.length) {
+            parts.push('当前还没有表。');
+        } else {
+            tables.forEach(function (t) {
+                parts.push('<StatusTable name="' + t.name + '">\n' + t.content + '\n</StatusTable>');
+            });
+        }
         var block = parts.join('\n');
-        if (block.length > 6000) block = block.slice(0, 6000);
+        if (block.length > 8000) block = block.slice(0, 8000);
         return block;
     }
     function looksLikeChatPayload(payload) {
@@ -197,9 +203,8 @@
                 if (cfg.enabled && cfg.modelLookup !== false && init && typeof init.body === 'string') {
                     var payload = JSON.parse(init.body);
                     if (looksLikeChatPayload(payload)) {
-                        var block = statusSystemBlock();
                         var msgs = payload.messages.slice();
-                        msgs.splice(Math.min(1, msgs.length), 0, { role: 'system', content: block });
+                        msgs.splice(Math.min(1, msgs.length), 0, { role: 'system', content: statusSystemBlock() });
                         payload.messages = msgs;
                         init = Object.assign({}, init, { body: JSON.stringify(payload) });
                     }
@@ -219,11 +224,11 @@
         if (modal) return modal;
         modal = document.createElement('div');
         modal.id = 'otStatusModal';
-        modal.style.cssText = 'display:none;position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.45);align-items:stretch;justify-content:center;padding:16px;';
+        modal.style.cssText = 'display:none;position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.45);padding:16px;';
         modal.innerHTML =
-            '<div style="background:#f6f1e8;color:#2b241c;width:min(720px,100%);max-height:86vh;margin:auto;border-radius:16px;display:flex;flex-direction:column;overflow:hidden;">' +
+            '<div style="background:#f6f1e8;color:#2b241c;width:min(720px,100%);max-height:86vh;margin:8vh auto 0;border-radius:16px;display:flex;flex-direction:column;overflow:hidden;">' +
             '<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid rgba(0,0,0,.08);">' +
-            '<b>\u72b6\u6001\u4e2d\u5fc3</b><button type="button" id="otStatusClose" style="border:0;background:#eee;border-radius:8px;padding:4px 10px;">\u5173\u95ed</button></div>' +
+            '<b>状态中心</b><button type="button" id="otStatusClose" style="border:0;background:#eee;border-radius:8px;padding:4px 10px;">关闭</button></div>' +
             '<div style="display:flex;min-height:320px;flex:1;overflow:hidden;">' +
             '<div id="otStatusTableList" style="width:36%;border-right:1px solid rgba(0,0,0,.08);overflow:auto;padding:8px;"></div>' +
             '<pre id="otStatusDetail" style="flex:1;margin:0;padding:12px;overflow:auto;white-space:pre-wrap;font-size:13px;line-height:1.55;"></pre>' +
@@ -235,7 +240,7 @@
     }
     function openModal() {
         ensureModal();
-        document.getElementById('otStatusModal').style.display = 'flex';
+        document.getElementById('otStatusModal').style.display = 'block';
         refreshPanel();
     }
     function refreshPanel() {
@@ -246,7 +251,7 @@
         var conv = typeof getActiveConv === 'function' ? getActiveConv() : null;
         var tables = listTables(activeCharacter(conv));
         if (!tables.length) {
-            listEl.innerHTML = '<div style="opacity:.6;padding:8px;">\u8fd8\u6ca1\u6709\u8868\u3002\u6a21\u578b\u56de\u5b8c\u4e00\u8f6e\u540e\u4f1a\u51fa\u73b0\u5728\u8fd9\u91cc\uff0c\u4e0d\u4f1a\u5199\u8fdb\u804a\u5929\u6b63\u6587\u3002</div>';
+            listEl.innerHTML = '<div style="opacity:.6;padding:8px;">还没有表。模型回完一轮后出现在这里，不会写进聊天正文。</div>';
             if (detail) detail.textContent = '';
             return;
         }
@@ -261,34 +266,21 @@
                 btn.style.background = '#f0e4d4';
             });
         });
-        if (detail && !detail.textContent && tables[0]) detail.textContent = tables[0].content || '';
+        if (detail && tables[0]) detail.textContent = tables[0].content || '';
     }
-    function injectUnderNote() {
-        if (document.getElementById('otStatusOpenBtn')) return;
-        var hosts = [document.getElementById('authorsNoteDialog'), document.getElementById('authorsNoteRow'), document.querySelector('[data-i18n="authors_note"]')];
-        var host = null;
-        for (var i = 0; i < hosts.length; i++) if (hosts[i]) { host = hosts[i]; break; }
-        if (!host) {
-            var nodes = document.querySelectorAll('button,div,span');
-            for (var j = 0; j < nodes.length; j++) {
-                var tx = (nodes[j].textContent || '').trim();
-                if (tx === '\u4f5c\u8005\u6ce8\u91ca' || tx === "Author's Note" || tx === 'Authors Note') {
-                    host = nodes[j].parentElement || nodes[j];
-                    break;
-                }
-            }
-        }
-        if (!host) return;
-        var wrap = document.createElement('div');
-        wrap.id = 'otStatusOpenBtn';
-        wrap.style.cssText = 'margin:8px 0 0;';
-        wrap.innerHTML = '<button type="button" style="width:100%;padding:8px 10px;border-radius:10px;border:1px solid rgba(0,0,0,.12);background:#fff7ee;">\u72b6\u6001\u4e2d\u5fc3</button>';
-        wrap.querySelector('button').addEventListener('click', function (e) {
+    function injectFab() {
+        if (document.getElementById('otStatusFab')) return;
+        var btn = document.createElement('button');
+        btn.id = 'otStatusFab';
+        btn.type = 'button';
+        btn.textContent = '状态中心';
+        btn.style.cssText = 'position:fixed;right:12px;bottom:96px;z-index:2147483000;padding:8px 12px;border-radius:999px;border:1px solid rgba(0,0,0,.12);background:#fff7ee;color:#2b241c;font-size:13px;box-shadow:0 4px 12px rgba(0,0,0,.12);';
+        btn.addEventListener('click', function (e) {
             e.preventDefault();
             e.stopPropagation();
             openModal();
         });
-        host.appendChild(wrap);
+        document.body.appendChild(btn);
     }
     function installHooks() {
         interceptOutgoingChat();
@@ -310,8 +302,8 @@
                 window[fn] = function (a, b) {
                     var cfg = getCfg();
                     if (cfg.enabled && cfg.hide) {
-                        if (typeof a === 'string') a = stripTables(a, true);
-                        if (typeof b === 'string') b = stripTables(b, true);
+                        if (typeof a === 'string') arguments[0] = stripTables(a, true);
+                        if (typeof b === 'string') arguments[1] = stripTables(b, true);
                     }
                     return orig.apply(this, arguments);
                 };
@@ -329,9 +321,13 @@
             finishAssistantMessage.__otStatusWrapped = true;
         }
     }
-    function boot() { installHooks(); injectUnderNote(); ensureModal(); }
+    function boot() {
+        installHooks();
+        injectFab();
+        ensureModal();
+    }
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', function () { setTimeout(boot, 0); });
     else setTimeout(boot, 0);
     window.addEventListener('load', function () { setTimeout(boot, 80); });
-    setInterval(function () { try { injectUnderNote(); } catch (e) {} }, 2000);
+    setInterval(function () { try { injectFab(); } catch (e) {} }, 2500);
 })();
