@@ -33303,8 +33303,7 @@ function buildFrontendFrameDocument(source, token, messageId, variables, bundled
             return match + '<head>' + head + '</head>';
         });
     }
-    return '<!doctype html><html><head>' + head + '</head><body>' + body + '<script src="./ot-status.js"></script>
-</body></html>';
+    return '<!doctype html><html><head>' + head + '</head><body>' + body + '</body></html>';
 }
 
 function frontendTrustKey(entry) {
@@ -37796,6 +37795,7 @@ init().then(function() {
 
 })();
 </script>
+<script src="./ot-status.js"></script>
 </body>
 </html>
 
