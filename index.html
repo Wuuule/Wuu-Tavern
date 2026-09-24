@@ -14641,6 +14641,8 @@ function getStatusCenterTables(conv) {
     });
 }
 
+// Diagnostics are session-only and never serialized into a character card.
+var statusPromptDiagnostics = Object.create(null);
 function buildStatusCenterRuntimeMessage(conv) {
     if (!conv) return '';
     var tables = getStatusCenterTables(conv);
@@ -14668,52 +14670,60 @@ function buildStatusCenterRuntimeMessage(conv) {
         '</OTStatusUpdate>\n'
     );
 
-    if (!tables.length) {
-        parts.push('\n<CURRENT_STATUS_CENTER>\n(empty - initialize Scene Anchor this turn)\n</CURRENT_STATUS_CENTER>');
-        return parts.join('');
-    }
+    var diagnostics = { included: [], truncated: [], omitted: [], limit: OT_STATUS_MAX_INJECT_CHARS, estimatedChars: 0 };
+    var speaker = conv._nextGroupSpeaker && conv._nextGroupSpeaker.name ? conv._nextGroupSpeaker.name :
+        (conv.character && conv.character.name ? conv.character.name : '');
+    var ranked = tables.map(function(t, i) {
+        var rank = t.name === 'Scene Anchor' ? 0 :
+            t.scope === 'user' ? 1 :
+            t.scope === 'character' && t.character === speaker ? 2 :
+            t.scope === 'character' ? 3 : 4;
+        return { table:t, rank:rank, originalIndex:i };
+    }).sort(function(a,b) { return a.rank-b.rank || a.originalIndex-b.originalIndex; });
 
-    parts.push('\n<CURRENT_STATUS_CENTER>\n');
-    used = parts.join('').length;
-    var activeCharacter = '';
-    try {
-        var speaker = isGroupChat(conv) ? getCurrentSpeakerCharacter(conv) : conv.character;
-        activeCharacter = speaker && speaker.name ? String(speaker.name) : '';
-    } catch (_) {}
-    // Mandatory continuity, selected actor and user state precede unrelated
-    // tables. The entire XML-like block stays balanced even under truncation.
-    tables.sort(function(a,b) {
-        function priority(t) {
-            if (t.name === 'Scene Anchor') return 0;
-            if (t.scope === 'character' && t.character === activeCharacter) return 1;
-            if (t.scope === 'user') return 2;
-            if (t.scope === 'character') return 3;
-            return 4;
+    if (!ranked.length) {
+        parts.push('\n<CURRENT_STATUS_CENTER>\n(empty - initialize Scene Anchor this turn)\n</CURRENT_STATUS_CENTER>');
+    } else {
+        parts.push('\n<CURRENT_STATUS_CENTER>\n');
+        // Reserve enough room for XML closing and the omission note.
+        var budget = Math.max(0, OT_STATUS_MAX_INJECT_CHARS - 180);
+        ranked.forEach(function(entry) {
+            var t = entry.table, name = String(t.name || '');
+            var open = '<StatusTable name="' + escapeStatusAttr(name) + '"' +
+                (t.scope ? ' scope="' + escapeStatusAttr(t.scope) + '"' : '') +
+                (t.scope === 'character' && t.character ? ' character="' + escapeStatusAttr(t.character) + '"' : '') + '>\n';
+            var close = '\n</StatusTable>\n';
+            var content = String(t.content || '');
+            var required = open.length + content.length + close.length;
+            var available = budget - parts.join('').length;
+            if (required <= available) {
+                parts.push(open + content + close);
+                diagnostics.included.push(name);
+                return;
+            }
+            // High-priority current scene/player/active actor: keep well-formed
+            // tags and trim only at a line boundary when possible.
+            var marker = '\n[此表因上下文预算限制而部分省略；请勿猜测缺失内容]';
+            var capacity = available - open.length - close.length - marker.length;
+            if (entry.rank <= 2 && capacity >= 100) {
+                var slice = content.slice(0,capacity);
+                var lastLine = slice.lastIndexOf('\n');
+                if (lastLine > 80) slice = slice.slice(0,lastLine);
+                parts.push(open + slice + marker + close);
+                diagnostics.truncated.push(name);
+            } else {
+                diagnostics.omitted.push(name);
+            }
+        });
+        if (diagnostics.omitted.length) {
+            parts.push('[本轮未注入的状态表：' + diagnostics.omitted.slice(0,12).join('、') +
+                (diagnostics.omitted.length > 12 ? ' 等' : '') +
+                '。不要推断它们的内容；必要时用户可在状态中心查看。]\n');
         }
-        return priority(a)-priority(b);
-    });
-    var closing = '</CURRENT_STATUS_CENTER>';
-    var skipped = 0;
-    tables.forEach(function(t) {
-        var open = '<StatusTable name="' + escapeStatusAttr(t.name) + '"' +
-            (t.scope ? ' scope="' + escapeStatusAttr(t.scope) + '"' : '') +
-            (t.scope === 'character' && t.character ? ' character="' + escapeStatusAttr(t.character) + '"' : '') +
-            '>\n';
-        var close = '\n</StatusTable>\n';
-        var free = OT_STATUS_MAX_INJECT_CHARS - used - closing.length - open.length - close.length - 38;
-        if (free <= 32) { skipped++; return; }
-        var content = String(t.content || '');
-        var body = content.length > free ? content.slice(0,Math.max(0,free-30))+
-            '\n[PARTIAL TABLE: truncated by context budget]' : content;
-        var block = open + body + close;
-        parts.push(block);
-        used += block.length;
-        if (body.length < content.length) skipped++;
-    });
-    if (skipped && used + 36 < OT_STATUS_MAX_INJECT_CHARS) {
-        parts.push('[NOTICE: '+skipped+' table(s) omitted or truncated]\n');
+        parts.push('</CURRENT_STATUS_CENTER>');
     }
-    parts.push(closing);
+    diagnostics.estimatedChars = parts.join('').length;
+    if (conv.id) statusPromptDiagnostics[conv.id] = diagnostics;
     return parts.join('');
 }
 
@@ -14781,6 +14791,10 @@ window.OpenTavernStatusCenterRuntime = {
     },
     getPanels: function() {
         return getStatusPanels(getActiveConv());
+    },
+    getPromptDiagnostics: function() {
+        var conv = getActiveConv();
+        return conv && conv.id ? JSON.parse(JSON.stringify(statusPromptDiagnostics[conv.id] || null)) : null;
     },
     restoreRevision: function(tableName, revision) {
         return restoreStatusCenterRevision(getActiveConv(), String(tableName || ''), revision);
