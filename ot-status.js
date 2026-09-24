@@ -110,6 +110,8 @@
             setHistoryVisible(!historyOpen);
             if (historyOpen) renderHistoryPanel(selectedTableName);
         };
+        // Optional panels are loaded separately: fire once the lazy modal exists.
+        window.dispatchEvent(new CustomEvent('ot-status-modal-created'));
     }
 
     function getHistory(name) {
