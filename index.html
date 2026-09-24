@@ -13109,7 +13109,10 @@ function restorePendingResponseRegeneration(conv) {
     var insertAt = Math.max(0, Math.min(Number(pending.insertIndex) || 0, conv.messages.length));
     var restored = pending.messages.map(function(msg) { return cloneJsonData(msg); });
     conv.messages.splice.apply(conv.messages, [insertAt, 0].concat(restored));
+    if(pending.beforeStatusCenter)conv.statusCenter=cloneJsonData(pending.beforeStatusCenter);
+    if(pending.beforeSummaries)conv.summaries=cloneJsonData(pending.beforeSummaries);
     delete conv._pendingResponseRegeneration;
+    notifyStatusCenterUpdated(conv);
 }
 
 function normalizeConversation(conv, options) {
@@ -23323,6 +23326,7 @@ function listConversationFavoriteEntries(conv) {
 function prepareResponseRegeneration(conv, msg) {
     if (!conv || !msg || !Array.isArray(conv.messages)) return null;
     syncActiveResponseVersion(conv, msg);
+    var beforeStatusCenter=cloneJsonData(conv.statusCenter||null);
     var insertIndex = conv.messages.indexOf(msg);
     if (insertIndex < 0) return null;
     var linked = msg.stage === 'second' ? [] : getLinkedSecondStageMessages(conv, msg);
@@ -23333,11 +23337,23 @@ function prepareResponseRegeneration(conv, msg) {
         insertIndex: insertIndex,
         responseVersions: cloneJsonData(msg.responseVersions),
         activeResponseVersion: msg.activeResponseVersion,
+        beforeStatusCenter:beforeStatusCenter,
         messages: originalMessages
     };
     conv._pendingResponseRegeneration = cloneJsonData(pending);
     if (msg.stage !== 'second') removeLinkedSecondStageMessages(conv, msg);
     var currentIndex = conv.messages.indexOf(msg);
+    // Candidate generation must start from the USER turn state, not the
+    // previously selected assistant answer's already-applied state.
+    if(msg.stage!=='second'&&currentIndex>=0){
+        var source=conv.messages.slice(0,currentIndex).reverse().find(function(m){return m&&m.role==='user';});
+        var baseline=source&&conv.storySnapshots&&conv.storySnapshots[source.id];
+        if(baseline&&baseline.statusCenter){
+            conv.statusCenter=cloneJsonData(baseline.statusCenter);
+            notifyStatusCenterUpdated(conv);
+        }
+    }
+    if(currentIndex>=0)invalidateStorySnapshotsAfter(conv,currentIndex);
     if (currentIndex >= 0) conv.messages.splice(currentIndex, 1);
     if (conv.mvu) rebuildMvuSnapshots(conv);
     return pending;
@@ -25160,6 +25176,12 @@ function openSummaryManager() {
 
 // Explicit per-turn scene snapshots: never fabricate past state from today.
 var STORY_SNAPSHOT_LIMIT=40, STORY_SNAPSHOT_BYTES=100000;
+function invalidateStorySnapshotsAfter(conv,index) {
+    if(!conv||!conv.storySnapshots||!Array.isArray(conv.messages))return;
+    conv.messages.slice(Math.max(0,index)).forEach(function(m){
+        if(m&&m.id)delete conv.storySnapshots[m.id];
+    });
+}
 function captureStorySnapshot(conv,msg){
     if(!conv||!msg||!msg.id)return false;
     var snap={messageId:msg.id,at:Date.now(),
@@ -35256,6 +35278,7 @@ function deleteMessage(actualIdx) {
     var msg = conv.messages[actualIdx];
     if (!msg) return;
     invalidatePinnedMemoriesAfter(conv,actualIdx);
+    invalidateStorySnapshotsAfter(conv,actualIdx);
     var deletedMessageId = msg.id || msg.messageId || String(actualIdx);
     if (msg.role === 'user') {
         var deleteCount = 1;
@@ -36121,8 +36144,22 @@ function editMessage(actualIdx, triggerBtn) {
             }
 
             invalidatePinnedMemoriesAfter(conv,actualIdx);
+            var userBaseSnapshot=conv.storySnapshots&&conv.storySnapshots[msg.id];
+            // Do not keep snapshots for messages whose text or descendants changed.
+            invalidateStorySnapshotsAfter(conv,actualIdx);
             selectOrCreateUserVersion(conv, msg, newVal);
             prepareUserEditRegeneration(conv, msg, actualIdx);
+            if(userBaseSnapshot&&userBaseSnapshot.statusCenter){
+                var pending=conv._pendingResponseRegeneration;
+                if(pending){
+                    pending.beforeStatusCenter=cloneJsonData(conv.statusCenter);
+                    pending.beforeSummaries=cloneJsonData(conv.summaries||[]);
+                }
+                conv.statusCenter=cloneJsonData(userBaseSnapshot.statusCenter);
+                conv.summaries=cloneJsonData(userBaseSnapshot.summaries||[]);
+                notifyStatusCenterUpdated(conv);
+            }
+            captureStorySnapshot(conv,msg);
             invalidateConversationAfterUserEdit(conv, actualIdx);
             conv.updated = Date.now();
             generateAfterUserEdit(conv);
@@ -36130,6 +36167,7 @@ function editMessage(actualIdx, triggerBtn) {
         }
 
         invalidatePinnedMemoriesAfter(conv,actualIdx);
+        invalidateStorySnapshotsAfter(conv,actualIdx);
         msg.content = newVal;
         msg.editedAt = Date.now();
         if (conv.mvu) rebuildMvuSnapshots(conv);
