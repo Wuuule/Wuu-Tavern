@@ -14925,6 +14925,9 @@ window.OpenTavernStatusCenterRuntime = {
         var conv = getActiveConv();
         return conv && conv.id ? JSON.parse(JSON.stringify(statusPromptDiagnostics[conv.id] || null)) : null;
     },
+    getFullPromptDiagnostics: function() {
+        return getPromptBuildDiagnostics(getActiveConv());
+    },
     listPinnedMemories: function(){return readPinnedMemories(getActiveConv());},
     addPinnedMemory: function(id,text){return addPinnedMemory(id,text);},
     deletePinnedMemory: function(id){return deletePinnedMemory(id);},
@@ -19020,6 +19023,22 @@ function buildMessagesForAPI(generationType) {
 
     // Activate World Info for this conversation
     var wiResult = getActivatedWorldInfo(conv);
+    var promptDiagnostic = {
+        builtAt: Date.now(),
+        generationType: generationType,
+        completionSource: resolveCompletionSource(state.settings, {}),
+        includeReasoningInHistory: state.settings.includeReasoningInHistory === true,
+        worldInfo: (wiResult.entries || []).slice(0, 80).map(function(entry) {
+            return {
+                uid: entry && entry.uid != null ? String(entry.uid) : '',
+                label: String(entry && (entry.comment || entry.name || (Array.isArray(entry.key) && entry.key[0]) || entry.uid) || '未命名条目').slice(0, 120),
+                estimatedTokens: estimateTokens(String(entry && entry.content || '')),
+                position: entry && entry.position != null ? entry.position : null,
+                constant: !!(entry && entry.constant)
+            };
+        }),
+        worldInfoBudgetTrimmed: !!conv._wiBudgetWarning
+    };
     var wiByPos = formatWorldInfoEntriesForPrompt(wiResult.byPosition || {}, currentChar, conv);
     var wiOutlets = formatWorldInfoEntriesForPrompt(wiResult.outlets || {}, currentChar, conv);
     var summaryMessages = [];
@@ -19218,6 +19237,22 @@ function buildMessagesForAPI(generationType) {
             content: applySillyTavernPromptMacros(preset.assistantPrefill, macroEnv)
         });
     }
+    var roleTotals = { system:0, user:0, assistant:0, other:0 };
+    var estimatedTotal = 0;
+    apiMessages.forEach(function(message) {
+        var role = String(message && message.role || 'other').toLowerCase();
+        if (!Object.prototype.hasOwnProperty.call(roleTotals, role)) role = 'other';
+        var contentText = getMessagePlainText(message && message.content);
+        var tokens = estimateTokens(contentText);
+        roleTotals[role] += tokens;
+        estimatedTotal += tokens;
+    });
+    promptDiagnostic.messageCount = apiMessages.length;
+    promptDiagnostic.estimatedTokens = estimatedTotal;
+    promptDiagnostic.roleEstimatedTokens = roleTotals;
+    promptDiagnostic.statusCenter = conv.id && statusPromptDiagnostics[conv.id]
+        ? cloneJsonData(statusPromptDiagnostics[conv.id]) : null;
+    if (conv.id) promptBuildDiagnostics[conv.id] = promptDiagnostic;
     return applyUserImagesToApiMessages(apiMessages, 4);
 }
 
@@ -19258,6 +19293,44 @@ function buildMessagesForContinue() {
         messages.push({ role: 'assistant', content: replacePlaceholders(preset.assistantPrefill, charName, userName) });
     }
     return messages;
+}
+
+function getPromptBuildDiagnostics(conv) {
+    if (!conv || !conv.id) return null;
+    return promptBuildDiagnostics[conv.id] ? cloneJsonData(promptBuildDiagnostics[conv.id]) : null;
+}
+
+function formatPromptDiagnostics(conv, messages) {
+    var d = getPromptBuildDiagnostics(conv);
+    if (!d) return '';
+    var roles = d.roleEstimatedTokens || {};
+    var lines = [
+        '=== PROMPT DIAGNOSTICS（估算，不是服务商账单 token）===',
+        '聊天补全来源: ' + String(d.completionSource || 'generic'),
+        '历史推理回传: ' + (d.includeReasoningInHistory ? 'ON（仅协议支持时）' : 'OFF'),
+        '消息数: ' + (d.messageCount || (messages || []).length),
+        '估算总 tokens: ~' + (d.estimatedTokens || 0),
+        '角色分布: system ~' + (roles.system || 0) + ' / user ~' + (roles.user || 0) +
+            ' / assistant ~' + (roles.assistant || 0)
+    ];
+    var wi = Array.isArray(d.worldInfo) ? d.worldInfo : [];
+    lines.push('世界书激活: ' + wi.length + (d.worldInfoBudgetTrimmed ? '（预算发生裁剪）' : ''));
+    wi.slice(0, 24).forEach(function(entry) {
+        lines.push('  - ' + entry.label + ' ~' + entry.estimatedTokens + ' tok' +
+            (entry.constant ? ' [constant]' : ''));
+    });
+    if (wi.length > 24) lines.push('  - …其余 ' + (wi.length - 24) + ' 条未展开');
+    var st = d.statusCenter;
+    if (st) {
+        lines.push('状态中心注入: included=' + (st.included || []).length +
+            ' / truncated=' + (st.truncated || []).length +
+            ' / omitted=' + (st.omitted || []).length +
+            ' / chars=' + (st.estimatedChars || 0) + '/' + (st.limit || 0));
+        if (st.truncated && st.truncated.length) lines.push('  截断: ' + st.truncated.join('、'));
+        if (st.omitted && st.omitted.length) lines.push('  省略: ' + st.omitted.join('、'));
+    }
+    lines.push('=== ACTUAL PROMPT ===');
+    return lines.join('\n') + '\n\n';
 }
 
 function formatPromptMessages(messages) {
@@ -21562,6 +21635,8 @@ function processTimedEffects(conv, activatedEntries) {
 }
 
 // ==================== API Client ====================
+var promptBuildDiagnostics = Object.create(null);
+
 function reasoningDetailsToText(details) {
     if (!Array.isArray(details)) return '';
     return details.map(function(part) {
@@ -38372,6 +38447,9 @@ function bindEvents() {
                 messages = buildMessagesForAPI();
             }
             var text = formatPromptMessages(messages);
+            if (currentPromptViewerStage !== 'second') {
+                text = formatPromptDiagnostics(getActiveConv(), messages) + text;
+            }
             dom.promptViewerContent.textContent = text || t('no_messages_to_send');
         } catch (err) {
             console.error('showFullPrompt error:', err);
