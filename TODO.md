@@ -15,7 +15,7 @@
 | P1 | 长期事件记忆与原消息关联 | ⬜ Planned | 消息编辑/删除/重新生成后可追踪并失效错误记忆 |
 | P1 | Swipes 候选回复与状态同步 | ⬜ Planned | 未选中的候选不污染当前剧情状态 |
 | P1 | Prompt token 构成、世界书及状态注入调试 | ⬜ Planned | 显示实际激活项、截断提示，不重复计数 |
-| P1 | Quick Reply 可折叠快捷菜单 | ⬜ Planned | 不挡输入框，不影响现有群聊 @ |
+| P1 | Quick Reply 可折叠快捷菜单 | 🧪 Implemented (browser QA pending) | 不挡输入框，不影响现有群聊 @ |
 | P2 | 角色语音/表情/沉浸模式 | ⬜ Planned | 默认关闭，低性能设备可禁用 |
 | P2 | 群聊角色互动优化 | ⬜ Planned | 不破坏原有指定发言和角色提示词 |
 | P3 | 扩展接口/模块化拆分 | ⬜ Planned | 新模块按需启用，无高频全页 MutationObserver |
@@ -54,3 +54,5 @@
 - [ ] Long-term event memory, token breakdown, Quick Reply, optional immersion UI and extension architecture.
 
 All feature work remains isolated on the development branch until browser and export/import verification.
+
+- Quick Reply 初版：保存至单独对话，在输入框现有 + 菜单内打开管理器；仅文本快捷语，不自动发送、不执行脚本，单对话最多 20 条。
