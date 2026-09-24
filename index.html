@@ -14787,6 +14787,54 @@ window.OpenTavernStatusCenterRuntime = {
     }
 };
 
+// Per-conversation inert text shortcuts. No script execution or global state.
+window.WuuQuickReplyRuntime = {
+    conversationId: function() { var c=getActiveConv();return c?c.id:null; },
+    list: function() {
+        var c=getActiveConv();
+        return c&&Array.isArray(c.quickReplies)?cloneJsonData(c.quickReplies):[];
+    },
+    upsert: async function(chatId,item) {
+        var c=getActiveConv();
+        if(!c||state.isGenerating||c.id!==chatId)return {ok:false,error:'请返回原对话，停止生成后重试。'};
+        var title=String(item&&item.title||'').trim().slice(0,32);
+        var text=String(item&&item.text||'').trim().slice(0,2400);
+        if(!title||!text)return {ok:false,error:'标题与内容均不能为空。'};
+        if(!Array.isArray(c.quickReplies))c.quickReplies=[];
+        var before=cloneJsonData(c.quickReplies);
+        var id=item&&item.id?String(item.id):makeId();
+        var hit=c.quickReplies.find(function(x){return x&&x.id===id;});
+        if(!hit&&c.quickReplies.length>=20)return {ok:false,error:'每场对话最多20条快捷语。'};
+        if(hit){hit.title=title;hit.text=text;}
+        else c.quickReplies.push({id:id,title:title,text:text,createdAt:Date.now()});
+        c.updated=Date.now();
+        var ok=await persistState(true);
+        if(!ok){c.quickReplies=before;return {ok:false,error:'保存失败，修改已撤销。'};}
+        return {ok:true,id:id};
+    },
+    remove: async function(chatId,id) {
+        var c=getActiveConv();
+        if(!c||state.isGenerating||c.id!==chatId)return {ok:false,error:'对话切换或仍在生成。'};
+        var before=cloneJsonData(c.quickReplies||[]);
+        c.quickReplies=before.filter(function(x){return x&&x.id!==id;});
+        var ok=await persistState(true);
+        if(!ok){c.quickReplies=before;return {ok:false,error:'保存失败，删除已撤销。'};}
+        return {ok:true};
+    },
+    insert: function(chatId,id) {
+        var c=getActiveConv();
+        if(!c||state.isGenerating||c.id!==chatId||!dom.messageInput)return false;
+        var item=(c.quickReplies||[]).find(function(x){return x&&x.id===id;});
+        if(!item)return false;
+        var field=dom.messageInput;
+        field.value+=(field.value&&!/\s$/.test(field.value)?'\n':'')+item.text;
+        field.dispatchEvent(new Event('input',{bubbles:true}));
+        closeComposerPlusMenu();
+        field.focus();
+        return true;
+    }
+};
+
 // ==================== Translation DOM Updates ====================
 function applyTranslations() {
     // data-i18n — text content
@@ -38413,3 +38461,5 @@ init().then(function() {
 <script src="./ot-status.js"></script>
 
 <script src="./ot-rp.js"></script>
+
+<script src="./ot-quick.js"></script>
