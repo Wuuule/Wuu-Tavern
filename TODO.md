@@ -44,3 +44,13 @@
 - `tests/status-center.test.cjs` + `.github/workflows/ci.yml`：基础自动化回归和 JS 语法检查。
 
 **尚未验证：** 完整的桌面/手机浏览器端到端 UI、真实 OPFS/浏览器恢复失败场景、实际备份导入。通过这些检查之前不要合并到 main。
+
+## Additional P0 features
+
+- [x] Chat-image embeds for both message roles (upload or HTTPS link) and a click-to-preview viewer; browser QA pending.
+- [x] Split character and user status cards; per-character switcher for group conversations; browser QA pending.
+- [x] New timeline snapshots and branch creation from snapshotted turns; browser QA pending.
+- [ ] Historical shared-world-book restore, full branch undo/redo and swipe-specific state restore.
+- [ ] Long-term event memory, token breakdown, Quick Reply, optional immersion UI and extension architecture.
+
+All feature work remains isolated on the development branch until browser and export/import verification.
