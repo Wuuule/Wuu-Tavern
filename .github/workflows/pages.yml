@@ -37,7 +37,7 @@ jobs:
           print('ready', p.stat().st_size)
           PY
           mkdir -p dist
-          cp index.html worker.js icon.png ot-boot.js ot-status.js ot-rp.js dist/
+          cp index.html worker.js icon.png ot-boot.js ot-status.js ot-rp.js ot-quick.js dist/
           touch dist/.nojekyll
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
