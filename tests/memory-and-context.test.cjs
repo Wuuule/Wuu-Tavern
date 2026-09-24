@@ -18,6 +18,7 @@ function mock(save=true) {
   slice('var OT_STATUS_MAX_TABLES = 50;','// ==================== Translation DOM Updates')+
   '\nreturn {runtime:window.OpenTavernStatusCenterRuntime, buildPinnedMemoryPrompt,'+
   'readPinnedMemories,addPinnedMemory,deletePinnedMemory,invalidatePinnedMemoriesAfter,'+
+  'readAutoMemories,parseAutoMemoriesFromBlock,applyAutoMemories,deleteAutoMemory,setAutoMemoryEnabled,buildAutoMemoryPrompt,'+
   'buildStatusCenterRuntimeMessage,applyStatusCenterUpdates};';
  const fn=new Function('state','window','persistState','CustomEvent','isGroupChat','getGroupMembers',
     'getUserPersonaById','makeId',code);
@@ -57,6 +58,36 @@ test('memory removal persists or restores its previous list on error',async()=>{
  fail.c.pinnedMemories=[{id:'x',messageId:'m1',text:'Existing',fingerprint:'bogus'}];
  assert.equal(await fail.deletePinnedMemory('x'),false);
  assert.equal(fail.c.pinnedMemories.length,1);
+});
+test('automatic memory is opt-in, source-linked, bounded per turn and hidden inside transport',async()=>{
+ const f=mock();
+ assert.equal(f.buildAutoMemoryPrompt(f.c),'');
+ assert.equal(await f.setAutoMemoryEnabled(true),true);
+ const items=f.parseAutoMemoriesFromBlock(
+   '<MemoryItem importance="high">Alice promised to meet the user next winter.</MemoryItem>'+
+   '<MemoryItem>Kyoto is their agreed reunion place.</MemoryItem>'+
+   '<MemoryItem>third item must be ignored</MemoryItem>');
+ assert.equal(items.length,2);
+ assert.equal(f.applyAutoMemories(f.c,f.c.messages[1],items),true);
+ assert.equal(f.readAutoMemories(f.c).length,2);
+ assert.match(f.buildAutoMemoryPrompt(f.c),/Alice promised/);
+ f.c.messages[1].content='Regenerated reply';
+ assert.equal(f.readAutoMemories(f.c).every(x=>x.stale),true);
+ assert.doesNotMatch(f.buildAutoMemoryPrompt(f.c),/Alice promised/);
+});
+test('automatic memory protocol appears only for conversations that enable it',async()=>{
+ const f=mock();
+ assert.doesNotMatch(f.buildStatusCenterRuntimeMessage(f.c),/<MemoryItem importance=/);
+ await f.setAutoMemoryEnabled(true);
+ const prompt=f.buildStatusCenterRuntimeMessage(f.c);
+ assert.match(prompt,/<MemoryItem importance="normal">/);
+});
+test('editing an earlier message also invalidates downstream automatic memories',async()=>{
+ const f=mock();
+ await f.setAutoMemoryEnabled(true);
+ f.applyAutoMemories(f.c,f.c.messages[1],[{text:'Durable fact',importance:'high'}]);
+ f.invalidatePinnedMemoriesAfter(f.c,0);
+ assert.equal(f.readAutoMemories(f.c)[0].stale,true);
 });
 test('status prompt prioritizes current scene and produces closed tags',()=>{
  const f=mock();
