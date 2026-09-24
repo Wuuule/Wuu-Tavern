@@ -1,0 +1,40 @@
+name: Safe upgrade checks
+# One push = one test run. PR sync doesn't duplicate notifications.
+on:
+  push:
+    branches:
+      - 'feature/**'
+    paths:
+      - 'index.html'
+      - 'ot-*.js'
+      - 'worker.js'
+      - 'wuu-ledger.js'
+      - 'tests/**'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: safe-upgrade-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - name: Check all application JavaScript
+        run: |
+          set -eu
+          for file in ot-*.js worker.js wuu-ledger.js; do
+            test -f "$file" || continue
+            node --check "$file"
+          done
+      - name: Run all regression tests
+        run: node --test tests/*.test.cjs

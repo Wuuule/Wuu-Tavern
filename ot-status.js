@@ -1,6 +1,8 @@
 /** Status Center UI. Core runtime lives inside index.html's main IIFE. */
 (function () {
     'use strict';
+    var selectedTableName = '';
+    var historyOpen = false;
 
     function runtime() {
         return window.OpenTavernStatusCenterRuntime || null;
@@ -42,6 +44,22 @@
     function ensureModal() {
         if (document.getElementById('otStatusModal')) return;
 
+        // Namespaced responsive rules; do not alter OpenTavern's other modals.
+        if (!document.getElementById('otStatusResponsiveStyle')) {
+            var style = document.createElement('style');
+            style.id = 'otStatusResponsiveStyle';
+            style.textContent = '@media(max-width:640px){' +
+                '#otStatusModal{padding:8px!important;}' +
+                '#otStatusShell{width:100%!important;height:calc(100dvh - 16px)!important;margin:0!important;}' +
+                '#otStatusLayout{flex-direction:column!important;}' +
+                '#otStatusTableList{display:flex!important;flex:none!important;width:100%!important;' +
+                    'min-width:0!important;max-height:104px!important;gap:6px!important;' +
+                    'border-right:0!important;border-bottom:1px solid rgba(127,127,127,.22)!important;}' +
+                '#otStatusTableList button{display:inline-block!important;width:auto!important;flex:none!important;}' +
+                '}';
+            document.head.appendChild(style);
+        }
+
         var modal = document.createElement('div');
         modal.id = 'otStatusModal';
         modal.style.cssText =
@@ -49,7 +67,7 @@
             'background:rgba(0,0,0,.48);padding:16px;box-sizing:border-box;';
 
         modal.innerHTML =
-            '<div style="background:var(--bg-primary,#f6f1e8);color:var(--text-primary,#2b241c);' +
+            '<div id="otStatusShell" style="background:var(--bg-primary,#f6f1e8);color:var(--text-primary,#2b241c);' +
             'width:min(860px,100%);height:min(78vh,720px);margin:7vh auto 0;border-radius:16px;' +
             'display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 70px rgba(0,0,0,.28);">' +
                 '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;' +
@@ -61,14 +79,20 @@
                     '<button type="button" id="otStatusClose" style="border:1px solid rgba(127,127,127,.22);' +
                     'background:transparent;color:inherit;border-radius:8px;padding:5px 11px;cursor:pointer;">关闭</button>' +
                 '</div>' +
-                '<div style="display:flex;min-height:0;flex:1;overflow:hidden;">' +
+                '<div id="otStatusLayout" style="display:flex;min-height:0;flex:1;overflow:hidden;">' +
                     '<div id="otStatusTableList" style="width:min(34%,260px);min-width:150px;' +
                     'border-right:1px solid rgba(127,127,127,.22);overflow:auto;padding:9px;"></div>' +
                     '<div style="min-width:0;flex:1;display:flex;flex-direction:column;">' +
-                        '<div id="otStatusTitle" style="font-weight:700;padding:12px 14px 0;"></div>' +
+                        '<div style="display:flex;justify-content:space-between;gap:10px;align-items:center;padding-right:12px;">' +
+                            '<div id="otStatusTitle" style="font-weight:700;padding:12px 14px 0;"></div>' +
+                            '<button type="button" id="otStatusHistoryToggle" style="display:none;cursor:pointer;' +
+                                'border:1px solid rgba(127,127,127,.23);border-radius:9px;padding:5px 10px;' +
+                                'background:transparent;color:inherit;font-size:12px;">历史版本</button>' +
+                        '</div>' +
                         '<div id="otStatusUpdated" style="font-size:11px;opacity:.58;padding:3px 14px 0;"></div>' +
                         '<pre id="otStatusDetail" style="flex:1;margin:0;padding:12px 14px 16px;overflow:auto;' +
                         'white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.65 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;"></pre>' +
+                        '<div id="otStatusHistoryPane" style="display:none;flex:1;overflow:auto;padding:10px 14px 16px;"></div>' +
                     '</div>' +
                 '</div>' +
             '</div>';
@@ -81,6 +105,100 @@
         document.getElementById('otStatusClose').onclick = function () {
             modal.style.display = 'none';
         };
+        document.getElementById('otStatusHistoryToggle').onclick = function () {
+            if (!selectedTableName) return;
+            setHistoryVisible(!historyOpen);
+            if (historyOpen) renderHistoryPanel(selectedTableName);
+        };
+        // Optional panels are loaded separately: fire once the lazy modal exists.
+        window.dispatchEvent(new CustomEvent('ot-status-modal-created'));
+    }
+
+    function getHistory(name) {
+        var rt = runtime();
+        if (!rt || typeof rt.listTableHistory !== 'function') return [];
+        try {
+            var result = rt.listTableHistory(name);
+            return Array.isArray(result) ? result : [];
+        } catch (err) {
+            console.warn('[Status Center UI] Cannot read revisions', err);
+            return [];
+        }
+    }
+
+    function setHistoryVisible(visible) {
+        historyOpen = !!visible;
+        var detail = document.getElementById('otStatusDetail');
+        var pane = document.getElementById('otStatusHistoryPane');
+        var button = document.getElementById('otStatusHistoryToggle');
+        if (detail) detail.style.display = historyOpen ? 'none' : 'block';
+        if (pane) pane.style.display = historyOpen ? 'block' : 'none';
+        if (button) button.textContent = historyOpen ? '返回当前表' : '历史版本';
+    }
+
+    // Build revision cards using textContent, never interpolating table data as HTML.
+    function renderHistoryPanel(tableName) {
+        var pane = document.getElementById('otStatusHistoryPane');
+        if (!pane) return;
+        pane.replaceChildren();
+        var versions = getHistory(tableName);
+        if (!versions.length) {
+            pane.textContent = '暂无可恢复的历史版本。';
+            return;
+        }
+        versions.forEach(function(entry) {
+            var card = document.createElement('section');
+            card.style.cssText = 'margin-bottom:10px;padding:10px;border-radius:10px;' +
+                'border:1px solid rgba(127,127,127,.22);';
+            var header = document.createElement('div');
+            header.style.cssText = 'font-size:12px;opacity:.8;margin-bottom:9px;';
+            header.textContent = 'rev ' + entry.revision + ' · ' +
+                formatUpdated(entry.capturedAt || entry.updated) +
+                (entry.source === 'manual-rollback' ? ' · 恢复前备份' : '');
+            card.appendChild(header);
+
+            var previewButton = document.createElement('button');
+            previewButton.type = 'button';
+            previewButton.textContent = '预览内容';
+            previewButton.style.cssText = 'margin-right:8px;padding:5px 9px;border-radius:8px;' +
+                'cursor:pointer;border:1px solid rgba(127,127,127,.3);background:transparent;color:inherit;';
+            var preview = document.createElement('pre');
+            preview.style.cssText = 'display:none;white-space:pre-wrap;overflow-wrap:anywhere;' +
+                'font:12px/1.6 ui-monospace,monospace;max-height:260px;overflow:auto;margin:10px 0 0;';
+            preview.textContent = entry.content;
+            previewButton.onclick = function() {
+                preview.style.display = preview.style.display === 'none' ? 'block' : 'none';
+            };
+            card.appendChild(previewButton);
+
+            var restoreButton = document.createElement('button');
+            restoreButton.type = 'button';
+            restoreButton.textContent = '恢复此版本';
+            restoreButton.style.cssText = 'padding:5px 9px;border-radius:8px;cursor:pointer;' +
+                'border:1px solid rgba(127,127,127,.3);background:transparent;color:inherit;';
+            restoreButton.onclick = async function() {
+                var rt = runtime();
+                if (!rt || typeof rt.restoreRevision !== 'function') return;
+                if (!window.confirm('将当前对话「' + tableName + '」恢复到 rev ' +
+                    entry.revision + '？当前版本会自动保留在历史中。')) return;
+                restoreButton.disabled = true;
+                try {
+                    var result = await rt.restoreRevision(tableName, entry.revision);
+                    refreshPanel(tableName);
+                    if (!result || !result.ok) {
+                        window.alert(result && result.error ? result.error : '恢复失败，未确认保存。');
+                    }
+                } catch (err) {
+                    console.error('[Status Center UI] Restore failed', err);
+                    window.alert('恢复失败。请检查浏览器存储后重试。');
+                } finally {
+                    restoreButton.disabled = false;
+                }
+            };
+            card.appendChild(restoreButton);
+            card.appendChild(preview);
+            pane.appendChild(card);
+        });
     }
 
     function showTable(tables, index) {
@@ -91,6 +209,10 @@
         if (!title || !updated || !detail || !list) return;
 
         if (!tables.length) {
+            selectedTableName = '';
+            setHistoryVisible(false);
+            var emptyToggle = document.getElementById('otStatusHistoryToggle');
+            if (emptyToggle) emptyToggle.style.display = 'none';
             title.textContent = '';
             updated.textContent = '';
             detail.textContent = '';
@@ -99,6 +221,10 @@
 
         index = Math.max(0, Math.min(Number(index) || 0, tables.length - 1));
         var table = tables[index];
+        selectedTableName = table.name || '';
+        setHistoryVisible(false);
+        var toggle = document.getElementById('otStatusHistoryToggle');
+        if (toggle) toggle.style.display = getHistory(selectedTableName).length ? 'inline-flex' : 'none';
         title.textContent = table.name || '';
         updated.textContent = table.updated
             ? ('更新：' + formatUpdated(table.updated) + ' · rev ' + (Number(table.revision) || 0))
@@ -156,9 +282,10 @@
         });
 
         var selected = 0;
-        if (preferredName) {
+        if (preferredName || selectedTableName) {
+            var targetName = preferredName || selectedTableName;
             for (var i = 0; i < tables.length; i++) {
-                if (tables[i] && tables[i].name === preferredName) {
+                if (tables[i] && tables[i].name === targetName) {
                     selected = i;
                     break;
                 }

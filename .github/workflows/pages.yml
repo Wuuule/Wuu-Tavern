@@ -30,14 +30,18 @@ jobs:
               start = head.rfind('<title>')
               if start >= 0:
                   text = head[:start] + '<title>Wuu-Tavern</title>' + rest
-          extra = '\n<script src="./ot-boot.js"></script>\n<script src="./ot-status.js"></script>\n'
-          if 'src="./ot-boot.js"' not in text:
+          # Existing hooks in index.html must not be double-loaded.
+          extra = ''
+          for script in ('ot-boot.js','ot-status.js','ot-rp.js','ot-quick.js','ot-memory.js','ot-branch.js'):
+              if ('src="./'+script+'"') not in text:
+                  extra += '\n<script src="./'+script+'"></script>'
+          if extra:
               text = text + extra
           p.write_text(text, encoding='utf-8')
           print('ready', p.stat().st_size)
           PY
           mkdir -p dist
-          cp index.html worker.js icon.png ot-boot.js ot-status.js dist/
+          cp index.html worker.js icon.png ot-boot.js ot-status.js ot-rp.js ot-quick.js ot-memory.js ot-branch.js dist/
           touch dist/.nojekyll
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

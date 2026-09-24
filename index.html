@@ -3370,6 +3370,17 @@ body.theme-momotalk .continue-btn:hover {
                 </div>
             </div>
             <div class="glass rounded-2xl p-3 border border-white/5">
+                <div class="mb-3">
+                    <label class="text-xs font-semibold text-zinc-400 uppercase tracking-wider" for="completionSource">聊天补全来源</label>
+                    <select id="completionSource" class="w-full mt-1.5 px-3 py-2 text-sm glass rounded-xl text-zinc-200 focus:outline-none focus:ring-2 focus:ring-amber-500/30">
+                        <option value="auto">自动识别（推荐）</option>
+                        <option value="openai">OpenAI / OpenAI-Compatible</option>
+                        <option value="openrouter">OpenRouter</option>
+                        <option value="deepseek">DeepSeek</option>
+                        <option value="generic">通用兼容模式</option>
+                    </select>
+                    <p id="completionSourceHint" class="text-[10px] text-zinc-600 mt-1 leading-relaxed">自动根据 API Endpoint 选择推理参数与解析方式；不会改变角色提示词。</p>
+                </div>
                 <div class="flex items-center justify-between gap-3">
                     <div class="min-w-0 flex-1">
                         <label class="text-xs font-semibold text-zinc-400 uppercase tracking-wider" data-i18n="settings_cot_request_label">请求 CoT</label>
@@ -3387,6 +3398,16 @@ body.theme-momotalk .continue-btn:hover {
                     </div>
                     <label class="relative inline-flex items-center cursor-pointer flex-shrink-0 ml-3">
                         <input type="checkbox" id="showCotEnabled" class="sr-only peer">
+                        <div class="w-9 h-5 bg-white/10 rounded-full peer-checked:bg-amber-500/60 peer-checked:ring-1 peer-checked:ring-amber-500/40 transition-all after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4"></div>
+                    </label>
+                </div>
+                <div class="flex items-center justify-between gap-3 mt-3">
+                    <div class="min-w-0 flex-1">
+                        <label class="text-xs font-semibold text-zinc-400 uppercase tracking-wider">回传历史推理</label>
+                        <p class="text-[10px] text-zinc-600 mt-0.5 break-words">默认关闭。仅在来源协议明确支持时回传；DeepSeek 使用 reasoning_content，OpenRouter 只回传已保存的结构化 reasoning_details，避免把普通 CoT 文本伪装成签名推理。</p>
+                    </div>
+                    <label class="relative inline-flex items-center cursor-pointer flex-shrink-0 ml-3">
+                        <input type="checkbox" id="includeReasoningInHistory" class="sr-only peer">
                         <div class="w-9 h-5 bg-white/10 rounded-full peer-checked:bg-amber-500/60 peer-checked:ring-1 peer-checked:ring-amber-500/40 transition-all after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4"></div>
                     </label>
                 </div>
@@ -11267,6 +11288,8 @@ function defaultSettings() {
         twoStagePostHistoryInstructions: '',
         requestCotEnabled: true,
         showCotEnabled: true,
+        completionSource: 'auto',
+        includeReasoningInHistory: false,
         reasoningEffortEnabled: false,
         reasoningEffort: 'medium',
         thinkingEnabled: false,
@@ -12517,10 +12540,19 @@ function stripInternalMessageMetadata(messages) {
             }).filter(Boolean);
             return { role: role, content: parts };
         }
-        return {
+        var normalized = {
             role: role,
             content: content != null ? String(content) : ''
         };
+        if (role === 'assistant' && message) {
+            if (typeof message.reasoning_content === 'string' && message.reasoning_content) {
+                normalized.reasoning_content = message.reasoning_content;
+            }
+            if (Array.isArray(message.reasoning_details) && message.reasoning_details.length) {
+                normalized.reasoning_details = cloneJsonData(message.reasoning_details);
+            }
+        }
+        return normalized;
     }).filter(function(message) {
         if (Array.isArray(message.content)) {
             return message.content.some(function(part) {
@@ -13071,6 +13103,11 @@ function normalizeResponseVersionRecord(record, conv, msg) {
     if (record.userMessageId) normalized.userMessageId = String(record.userMessageId);
     if (record.userVersionId) normalized.userVersionId = String(record.userVersionId);
     if (typeof record.userContent !== 'undefined') normalized.userContent = String(record.userContent || '');
+    // Legacy records stay unversioned unless an authentic snapshot exists.
+    if (record.statusCenter && typeof record.statusCenter === 'object' &&
+        Array.isArray(record.statusCenter.tables)) {
+        normalized.statusCenter = cloneJsonData(record.statusCenter);
+    }
     return normalized;
 }
 
@@ -13109,7 +13146,10 @@ function restorePendingResponseRegeneration(conv) {
     var insertAt = Math.max(0, Math.min(Number(pending.insertIndex) || 0, conv.messages.length));
     var restored = pending.messages.map(function(msg) { return cloneJsonData(msg); });
     conv.messages.splice.apply(conv.messages, [insertAt, 0].concat(restored));
+    if(pending.beforeStatusCenter)conv.statusCenter=cloneJsonData(pending.beforeStatusCenter);
+    if(pending.beforeSummaries)conv.summaries=cloneJsonData(pending.beforeSummaries);
     delete conv._pendingResponseRegeneration;
+    notifyStatusCenterUpdated(conv);
 }
 
 function normalizeConversation(conv, options) {
@@ -13756,6 +13796,7 @@ var renderSubscriptions = {
         renderMessagesOnly();
         renderCharacterUI();
         renderWorldInfoBudgetWarning();
+        window.dispatchEvent(new CustomEvent('ot-chat-context-changed'));
     },
     'isGenerating': function() {
         updateInputState();
@@ -13916,12 +13957,15 @@ function appendFinalAssistantMessage(conv, fullContent, fullCot) {
         <div class="max-w-[80%] msg-wrapper">
             ${renderAssistantNameAndAvatarHtml(senderName, getMessageSpeakerCharacter(lastMsg, conv))}
             ${renderCotBlock(fullCot, false, { conv: conv, msg: lastMsg, actualIdx: actualIdx, character: getMessageSpeakerCharacter(lastMsg, conv) })}
-            ${renderMessageBubbleShell(renderAssistantContent(fullContent, { conv: conv, msg: lastMsg, actualIdx: actualIdx, character: getMessageSpeakerCharacter(lastMsg, conv) }), lastMsg, actualIdx)}
+            ${renderMessageBubbleShell(renderAssistantContent(fullContent, { conv: conv, msg: lastMsg, actualIdx: actualIdx, character: getMessageSpeakerCharacter(lastMsg, conv) }) + renderMessageAttachments(lastMsg), lastMsg, actualIdx)}
             <div class="msg-actions">${renderGreetingSwipeControls(lastMsg, actualIdx)}
                 <button class="msg-action-btn copy-btn" data-action="copy" data-msg-idx="${actualIdx}" title="${t('copy')}">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                 </button>
                 ${renderFavoriteStarHtml(lastMsg, actualIdx)}
+                ${renderChatImageAction(actualIdx)}
+                ${renderPinMemoryAction(actualIdx)}
+                ${renderStoryBranchAction(conv,lastMsg,actualIdx)}
                 ${renderSpeakButton(actualIdx)}
                 <button class="msg-action-btn edit-btn" data-action="edit" data-msg-idx="${actualIdx}" title="${t('edit_msg')}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
                 ${renderContinueButton(conv, lastMsg, actualIdx)}
@@ -14357,6 +14401,8 @@ function getActiveConv() {
 var OT_STATUS_MAX_TABLES = 50;
 var OT_STATUS_MAX_TABLE_CHARS = 12000;
 var OT_STATUS_MAX_INJECT_CHARS = 16000;
+var OT_STATUS_MAX_HISTORY = 80;        // Bounded per-conversation revision storage.
+var OT_STATUS_MAX_HISTORY_PER_TABLE = 8;
 
 function ensureStatusCenter(conv) {
     if (!conv) return { version: 2, tables: [] };
@@ -14365,6 +14411,10 @@ function ensureStatusCenter(conv) {
     }
     conv.statusCenter.version = 2;
     if (!Array.isArray(conv.statusCenter.tables)) conv.statusCenter.tables = [];
+    if (!Array.isArray(conv.statusCenter.history)) conv.statusCenter.history = [];
+    if (conv.statusCenter.history.length > OT_STATUS_MAX_HISTORY) {
+        conv.statusCenter.history = conv.statusCenter.history.slice(-OT_STATUS_MAX_HISTORY);
+    }
 
     // One-time migration from the experimental external script.
     if (Array.isArray(conv.otStatusTables) && conv.otStatusTables.length) {
@@ -14416,6 +14466,23 @@ function readStatusTableName(attrs, fallback) {
     return value || fallback || '';
 }
 
+function readStatusMetadata(attrs) {
+    var s = String(attrs || '').match(/\bscope\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+    var c = String(attrs || '').match(/\bcharacter\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+    var scope = s ? unescapeStatusAttr(s[1] || s[2] || '').toLowerCase().trim() : '';
+    var character = c ? unescapeStatusAttr(c[1] || c[2] || '').trim().slice(0, 80) : '';
+    return { scope: scope === 'character' || scope === 'user' ? scope : '', character: character };
+}
+
+function canonicalStatusTableName(name, scope, character) {
+    var label = String(name || '').trim().slice(0, 120);
+    var who = String(character || '').trim().slice(0, 80);
+    if (scope === 'character' && who && !label.endsWith(' · ' + who)) {
+        return (label + ' · ' + who).slice(0, 120);
+    }
+    return label;
+}
+
 function parseStatusTablesFromBlock(block) {
     var src = String(block || '');
     var tables = [];
@@ -14425,8 +14492,11 @@ function parseStatusTablesFromBlock(block) {
         var name = readStatusTableName(m[1], 'table-' + (tables.length + 1));
         var content = String(m[2] || '').trim();
         if (!name || !content) continue;
+        var meta = readStatusMetadata(m[1]);
         tables.push({
-            name: name.slice(0, 120),
+            name: canonicalStatusTableName(name, meta.scope, meta.character),
+            scope: meta.scope,
+            character: meta.scope === 'character' ? meta.character : '',
             content: content.slice(0, OT_STATUS_MAX_TABLE_CHARS)
         });
         if (tables.length >= OT_STATUS_MAX_TABLES) break;
@@ -14442,6 +14512,7 @@ function stripStatusTransportForDisplay(text, allowPartial) {
 
     // Backward compatibility with standalone table blocks from older cards.
     src = src.replace(/<(?:StatusTable|OTTable|Ledger)\b[^>]*>[\s\S]*?<\/(?:StatusTable|OTTable|Ledger)>/gi, '');
+    src = src.replace(/<MemoryItem\b[^>]*>[\s\S]*?<\/MemoryItem>/gi, '');
 
     if (allowPartial) {
         var cuts = [];
@@ -14458,10 +14529,12 @@ function stripStatusTransportForDisplay(text, allowPartial) {
 function consumeStatusCenterUpdate(conv, rawText) {
     var src = String(rawText == null ? '' : rawText);
     var updates = [];
+    var memories = [];
     var wrapperRe = /<OTStatusUpdate\b[^>]*>([\s\S]*?)<\/OTStatusUpdate>/gi;
     var m;
     while ((m = wrapperRe.exec(src))) {
         updates = updates.concat(parseStatusTablesFromBlock(m[1]));
+        memories = memories.concat(parseAutoMemoriesFromBlock(m[1]));
     }
 
     // Compatibility path for cards that still emit bare <StatusTable> blocks.
@@ -14471,7 +14544,8 @@ function consumeStatusCenterUpdate(conv, rawText) {
 
     return {
         visibleText: stripStatusTransportForDisplay(src, true),
-        updates: updates
+        updates: updates,
+        memories: memories.slice(0,AUTO_MEMORY_PER_TURN)
     };
 }
 
@@ -14483,6 +14557,79 @@ function notifyStatusCenterUpdated(conv) {
     } catch (_) {}
 }
 
+// Store the previous table value, not the incoming one. Every rollback also
+// records the current value so a mistaken restore can be undone.
+function rememberStatusCenterRevision(center, table, source) {
+    if (!center || !table || !String(table.content || '').trim()) return;
+    if (!Array.isArray(center.history)) center.history = [];
+    center.history.push({
+        name: String(table.name || ''),
+        content: String(table.content || '').slice(0, OT_STATUS_MAX_TABLE_CHARS),
+        revision: Number(table.revision) || 0,
+        updated: Number(table.updated) || 0,
+        capturedAt: Date.now(),
+        source: source === 'manual-rollback' ? source : 'model-update'
+    });
+    var countByName = Object.create(null);
+    var kept = [];
+    for (var i = center.history.length - 1; i >= 0 && kept.length < OT_STATUS_MAX_HISTORY; i--) {
+        var item = center.history[i];
+        if (!item || !item.name) continue;
+        var name = String(item.name);
+        countByName[name] = (countByName[name] || 0) + 1;
+        if (countByName[name] <= OT_STATUS_MAX_HISTORY_PER_TABLE) kept.push(item);
+    }
+    center.history = kept.reverse();
+}
+
+function getStatusCenterHistory(conv, tableName) {
+    if (!conv || !String(tableName || '').trim()) return [];
+    var center = ensureStatusCenter(conv);
+    return center.history.filter(function(h) { return h && h.name === tableName; })
+        .slice(-OT_STATUS_MAX_HISTORY_PER_TABLE).reverse().map(function(h) {
+            return {
+                name: h.name,
+                content: String(h.content || '').slice(0, OT_STATUS_MAX_TABLE_CHARS),
+                revision: Number(h.revision) || 0,
+                updated: Number(h.updated) || 0,
+                capturedAt: Number(h.capturedAt) || 0,
+                source: String(h.source || 'previous-version')
+            };
+        });
+}
+
+// Only the active conversation can be edited from the UI, never another card.
+async function restoreStatusCenterRevision(conv, tableName, revision) {
+    if (!conv || conv !== getActiveConv()) return { ok: false, error: '当前对话已切换，未修改任何数据。' };
+    if (state.isGenerating) return { ok: false, error: '请先停止生成，再恢复状态。' };
+    var center = ensureStatusCenter(conv);
+    var hit = center.tables.find(function(t) { return t && t.name === tableName; });
+    var previous = center.history.slice().reverse().find(function(h) {
+        return h && h.name === tableName && Number(h.revision) === Number(revision);
+    });
+    if (!hit || !previous) return { ok: false, error: '未找到该表或历史版本。' };
+    var restoredContent = String(previous.content || '').slice(0, OT_STATUS_MAX_TABLE_CHARS);
+    if (!restoredContent || hit.content === restoredContent) {
+        return { ok: false, error: '该历史版本与当前内容相同，或内容为空。' };
+    }
+    rememberStatusCenterRevision(center, hit, 'manual-rollback');
+    hit.content = restoredContent;
+    hit.updated = Date.now();
+    hit.revision = (Number(hit.revision) || 0) + 1;
+    conv.updated = Date.now();
+    notifyStatusCenterUpdated(conv);
+    // Do not report success until the browser storage backend confirms saving.
+    try {
+        var saved = await persistState(true);
+        return saved
+            ? { ok: true, revision: hit.revision }
+            : { ok: false, memoryUpdated: true, error: '已在当前页面恢复，但保存失败！请立即导出对话备份。' };
+    } catch (err) {
+        console.error('[Status Center] Manual restore could not persist', err);
+        return { ok: false, memoryUpdated: true, error: '恢复仅存在于当前页面；保存失败，请立即导出备份。' };
+    }
+}
+
 function applyStatusCenterUpdates(conv, updates) {
     if (!conv || !Array.isArray(updates) || !updates.length) return false;
     var center = ensureStatusCenter(conv);
@@ -14490,7 +14637,9 @@ function applyStatusCenterUpdates(conv, updates) {
 
     updates.forEach(function(update) {
         if (!update) return;
-        var name = String(update.name || '').trim().slice(0, 120);
+        var scope = update.scope === 'character' || update.scope === 'user' ? update.scope : '';
+        var character = scope === 'character' ? String(update.character || '').trim().slice(0, 80) : '';
+        var name = canonicalStatusTableName(update.name, scope, character);
         var content = String(update.content || '').trim().slice(0, OT_STATUS_MAX_TABLE_CHARS);
         if (!name || !content) return;
 
@@ -14502,11 +14651,13 @@ function applyStatusCenterUpdates(conv, updates) {
                 });
                 center.tables.shift();
             }
-            hit = { name: name, content: '', updated: 0, revision: 0 };
+            hit = { name: name, scope: scope, character: character, content: '', updated: 0, revision: 0 };
             center.tables.push(hit);
         }
-
+        if (scope && !hit.scope) hit.scope = scope;
+        if (character && !hit.character) hit.character = character;
         if (hit.content !== content) {
+            rememberStatusCenterRevision(center, hit, 'model-update');
             hit.content = content;
             hit.updated = Date.now();
             hit.revision = (Number(hit.revision) || 0) + 1;
@@ -14526,11 +14677,198 @@ function getStatusCenterTables(conv) {
     return center.tables.map(function(t) {
         return {
             name: String(t.name || ''),
+            scope: String(t.scope || ''),
+            character: String(t.character || ''),
             content: String(t.content || ''),
             updated: Number(t.updated) || 0,
             revision: Number(t.revision) || 0
         };
     });
+}
+
+// Diagnostics are session-only and never serialized into a character card.
+var statusPromptDiagnostics = Object.create(null);
+
+var PIN_MEMORY_LIMIT=40, PIN_MEMORY_PROMPT_CHARS=4500;
+var AUTO_MEMORY_LIMIT = 80;
+var AUTO_MEMORY_PROMPT_CHARS = 5000;
+var AUTO_MEMORY_PER_TURN = 2;
+function fingerprintMessage(text) {
+    var raw=String(text||''),h=2166136261;
+    for(var k=0;k<raw.length;k++){h^=raw.charCodeAt(k);h=Math.imul(h,16777619);}
+    return raw.length+':'+(h>>>0).toString(16);
+}
+function readPinnedMemories(conv) {
+    if(!conv)return [];
+    var lookup=Object.create(null);
+    (conv.messages||[]).forEach(function(m){if(m&&m.id)lookup[m.id]=m;});
+    return (Array.isArray(conv.pinnedMemories)?conv.pinnedMemories:[]).slice(-PIN_MEMORY_LIMIT)
+        .filter(function(m){return !!(m&&m.id&&m.messageId&&m.text);})
+        .map(function(m){
+            var source=lookup[m.messageId];
+            return {id:m.id,messageId:m.messageId,text:String(m.text).slice(0,600),
+                createdAt:m.createdAt||0,sourceRole:m.sourceRole||'',
+                stale:!!m.stale||!source||fingerprintMessage(source.content)!==m.fingerprint};
+        });
+}
+async function addPinnedMemory(messageId,text) {
+    var conv=getActiveConv();
+    if(!conv||state.isGenerating)return {ok:false,error:'生成期间不能修改记忆'};
+    var source=(conv.messages||[]).find(function(m){return m&&m.id===messageId;});
+    if(!source)return {ok:false,error:'原消息已不存在'};
+    var trimmed=String(text||'').trim().slice(0,600);
+    if(!trimmed)return {ok:false,error:'记忆不能为空'};
+    if(!Array.isArray(conv.pinnedMemories))conv.pinnedMemories=[];
+    if(conv.pinnedMemories.length>=PIN_MEMORY_LIMIT)return {ok:false,error:'记忆已达40条上限'};
+    var record={id:makeId(),messageId:messageId,text:trimmed,createdAt:Date.now(),
+        sourceRole:source.role||'',fingerprint:fingerprintMessage(source.content),stale:false};
+    conv.pinnedMemories.push(record);
+    try{
+        if(await persistState(true)===true){
+            window.dispatchEvent(new CustomEvent('ot-pinned-memory-updated'));
+            return {ok:true,id:record.id};
+        }
+    }catch(err){console.error('[Pinned memory] Save failed',err);}
+    conv.pinnedMemories=conv.pinnedMemories.filter(function(x){return x!==record;});
+    return {ok:false,error:'保存失败，未添加记忆'};
+}
+async function deletePinnedMemory(id){
+    var conv=getActiveConv();
+    if(!conv||state.isGenerating||!Array.isArray(conv.pinnedMemories))return false;
+    var before=conv.pinnedMemories.slice();
+    conv.pinnedMemories=before.filter(function(x){return x&&x.id!==id;});
+    if(before.length===conv.pinnedMemories.length)return false;
+    try{
+        if(await persistState(true)===true){
+            window.dispatchEvent(new CustomEvent('ot-pinned-memory-updated'));
+            return true;
+        }
+    }catch(err){console.error('[Pinned memory] Remove failed',err);}
+    conv.pinnedMemories=before;
+    return false;
+}
+function invalidatePinnedMemoriesAfter(conv,index){
+    if(!conv)return;
+    var affected=new Set((conv.messages||[]).slice(Math.max(0,index))
+        .map(function(m){return m&&m.id;}).filter(Boolean));
+    if(Array.isArray(conv.pinnedMemories)){
+        conv.pinnedMemories.forEach(function(m){if(m&&affected.has(m.messageId))m.stale=true;});
+    }
+    if(Array.isArray(conv.autoMemories)){
+        conv.autoMemories.forEach(function(m){if(m&&affected.has(m.messageId))m.stale=true;});
+    }
+}
+function readAutoMemories(conv){
+    if(!conv)return [];
+    var lookup=Object.create(null);
+    (conv.messages||[]).forEach(function(m){if(m&&m.id)lookup[m.id]=m;});
+    return (Array.isArray(conv.autoMemories)?conv.autoMemories:[]).slice(-AUTO_MEMORY_LIMIT)
+        .filter(function(m){return !!(m&&m.id&&m.messageId&&m.text);})
+        .map(function(m){
+            var source=lookup[m.messageId];
+            return {id:m.id,messageId:m.messageId,text:String(m.text).slice(0,500),
+                createdAt:Number(m.createdAt)||0,importance:String(m.importance||'normal'),
+                stale:!!m.stale||!source||fingerprintMessage(source.content)!==m.fingerprint};
+        });
+}
+function normalizeAutoMemoryText(value){
+    return String(value||'').replace(/\s+/g,' ').trim().slice(0,500);
+}
+function parseAutoMemoriesFromBlock(block){
+    var out=[],src=String(block||''),re=/<MemoryItem\b([^>]*)>([\s\S]*?)<\/MemoryItem>/gi,m;
+    while((m=re.exec(src))&&out.length<AUTO_MEMORY_PER_TURN){
+        var text=normalizeAutoMemoryText(m[2]);
+        if(!text)continue;
+        var im=String(m[1]||'').match(/\bimportance\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+        var importance=String(im&&(im[1]||im[2])||'normal').toLowerCase();
+        if(['high','normal'].indexOf(importance)<0)importance='normal';
+        out.push({text:text,importance:importance});
+    }
+    return out;
+}
+function applyAutoMemories(conv,sourceMessage,items){
+    if(!conv||!sourceMessage||conv.autoMemoryEnabled!==true||!Array.isArray(items)||!items.length)return false;
+    if(!Array.isArray(conv.autoMemories))conv.autoMemories=[];
+    var existing=new Set(readAutoMemories(conv).filter(function(x){return !x.stale;})
+        .map(function(x){return normalizeAutoMemoryText(x.text).toLowerCase();}));
+    var changed=false;
+    items.slice(0,AUTO_MEMORY_PER_TURN).forEach(function(item){
+        var text=normalizeAutoMemoryText(item&&item.text),key=text.toLowerCase();
+        if(!text||existing.has(key))return;
+        conv.autoMemories.push({id:makeId(),messageId:sourceMessage.id,text:text,
+            importance:item.importance==='high'?'high':'normal',createdAt:Date.now(),
+            fingerprint:fingerprintMessage(sourceMessage.content),stale:false});
+        existing.add(key);changed=true;
+    });
+    if(conv.autoMemories.length>AUTO_MEMORY_LIMIT)conv.autoMemories=conv.autoMemories.slice(-AUTO_MEMORY_LIMIT);
+    if(changed)window.dispatchEvent(new CustomEvent('ot-auto-memory-updated'));
+    return changed;
+}
+async function deleteAutoMemory(id){
+    var conv=getActiveConv();
+    if(!conv||state.isGenerating||!Array.isArray(conv.autoMemories))return false;
+    var before=conv.autoMemories.slice();
+    conv.autoMemories=before.filter(function(x){return x&&x.id!==id;});
+    if(before.length===conv.autoMemories.length)return false;
+    try{
+        if(await persistState(true)===true){
+            window.dispatchEvent(new CustomEvent('ot-auto-memory-updated'));return true;
+        }
+    }catch(err){console.error('[Auto memory] Remove failed',err);}
+    conv.autoMemories=before;return false;
+}
+async function setAutoMemoryEnabled(enabled){
+    var conv=getActiveConv();
+    if(!conv||state.isGenerating)return false;
+    var previous=conv.autoMemoryEnabled===true;
+    conv.autoMemoryEnabled=!!enabled;
+    try{
+        if(await persistState(true)===true){
+            window.dispatchEvent(new CustomEvent('ot-auto-memory-updated'));return true;
+        }
+    }catch(err){console.error('[Auto memory] Setting save failed',err);}
+    conv.autoMemoryEnabled=previous;return false;
+}
+function buildAutoMemoryPrompt(conv){
+    if(!conv||conv.autoMemoryEnabled!==true)return '';
+    var current=readAutoMemories(conv).filter(function(m){return !m.stale;});
+    if(!current.length)return '';
+    current.sort(function(a,b){
+        var ai=a.importance==='high'?0:1,bi=b.importance==='high'?0:1;
+        return ai-bi||a.createdAt-b.createdAt;
+    });
+    var output='【自动长期记忆】\n这些事实来自先前助手回复并带来源校验；若与较新的用户说明冲突，以最新用户说明为准。不得在正文复述记忆列表。\n';
+    current.forEach(function(m){
+        var line='- '+m.text+'\n';
+        if(output.length+line.length<=AUTO_MEMORY_PROMPT_CHARS)output+=line;
+    });
+    return output;
+}
+
+function buildPinnedMemoryPrompt(conv){
+    var current=readPinnedMemories(conv).filter(function(m){return !m.stale;});
+    if(!current.length)return '';
+    var output='【用户手动固定的记忆】\n这些条目有对应聊天来源。如果与较新的用户说明冲突，以最新用户说明为准。不得在可见正文打印此列表。\n';
+    current.forEach(function(m){
+        var line='- '+String(m.text).replace(/[\r\n]+/g,' ').slice(0,600)+'\n';
+        if(output.length+line.length<=PIN_MEMORY_PROMPT_CHARS)output+=line;
+    });
+    return output;
+}
+function renderPinMemoryAction(idx){
+    return '<button class="msg-action-btn" data-action="pin-memory" data-msg-idx="'+idx+
+        '" title="固定重要记忆" aria-label="固定重要记忆">✦</button>';
+}
+async function promptPinnedMemory(idx){
+    var conv=getActiveConv(),msg=conv&&conv.messages[idx];
+    if(!msg||state.isGenerating)return;
+    var content=String(msg.content||'').trim().slice(0,500);
+    if(!content)return;
+    var value=await showGlassPrompt('编辑要保存的事实。用户固定的记忆将用于后续相关剧情。',{
+        title:'固定重要记忆',input:{value:content,maxLength:600}});
+    if(value===null||conv!==getActiveConv()||state.isGenerating)return;
+    var result=await addPinnedMemory(msg.id,value);
+    if(!result.ok)await showGlassConfirm(result.error,{showCancel:false,title:'记忆未保存'});
 }
 
 function buildStatusCenterRuntimeMessage(conv) {
@@ -14548,37 +14886,118 @@ function buildStatusCenterRuntimeMessage(conv) {
         '1. 正常输出故事正文；禁止在正文、选项、可见 HUD 中打印状态中心表。\n' +
         '2. 每个主回复末尾必须输出且只输出一个 <OTStatusUpdate>...</OTStatusUpdate> 传输块；它不是给玩家看的。\n' +
         '3. 每轮必须更新名为 "Scene Anchor" 的表：只记录当前时间/阶段、地点、在场人物、刚刚发生、当前悬点、必须保持的连续性；保持简洁。\n' +
-        '4. 角色卡/世界书若定义了其他状态追踪规则，按规则更新对应表；有变化的表输出“更新后的完整表”。没有定义业务表时不要自行发明，只维护 Scene Anchor。\n' +
+        '4. 角色卡/世界书若定义了其他状态追踪规则，按规则更新对应表；有变化的表输出“更新后的完整表”。不要自行发明未经剧情确认的数值。\n' +
+        '4a. 人物当前状态与玩家当前状态必须独立存放：角色逐人输出 <StatusTable name="角色状态" scope="character" character="角色名">；玩家输出 <StatusTable name="玩家状态" scope="user">；只记录剧情确认的状态，缺失则保持为空，不能造数值。\n' +
+        '4b. 群聊只更新已变化角色，保留其他角色旧状态；角色名与角色卡成员一致，旧式无 scope 的表保持兼容。\n' +
         '5. 完成/历史类表若内容规则要求只追加，则保留旧事实后追加；人物关系不得因再次见面自动重置。\n' +
         '6. 相对预约应尽量同时保存绝对锚点（如第N天到期）与当前剩余量，避免“还剩5天”永久不变。\n' +
         '7. 传输块格式：\n' +
+        (conv.autoMemoryEnabled===true
+            ? '7a. 仅当本轮出现跨多轮仍有价值的稳定事实（重要承诺、身份/关系永久变化、重大揭示、长期偏好）时，可在传输块加入最多2条 <MemoryItem importance="high|normal">事实</MemoryItem>。不要保存即时动作、重复剧情、猜测、内心分析或普通对白。\n'
+            : '') +
         '<OTStatusUpdate>\n' +
         '<StatusTable name="Scene Anchor">...</StatusTable>\n' +
         '<StatusTable name="由内容规则定义的表名">...</StatusTable>\n' +
+        (conv.autoMemoryEnabled===true ? '<MemoryItem importance="normal">可长期保留的事实</MemoryItem>\n' : '') +
         '</OTStatusUpdate>\n'
     );
 
-    if (!tables.length) {
+    var diagnostics = { included: [], truncated: [], omitted: [], limit: OT_STATUS_MAX_INJECT_CHARS, estimatedChars: 0 };
+    var speaker = conv._nextGroupSpeaker && conv._nextGroupSpeaker.name ? conv._nextGroupSpeaker.name :
+        (conv.character && conv.character.name ? conv.character.name : '');
+    var ranked = tables.map(function(t, i) {
+        var rank = t.name === 'Scene Anchor' ? 0 :
+            t.scope === 'user' ? 1 :
+            t.scope === 'character' && t.character === speaker ? 2 :
+            t.scope === 'character' ? 3 : 4;
+        return { table:t, rank:rank, originalIndex:i };
+    }).sort(function(a,b) { return a.rank-b.rank || a.originalIndex-b.originalIndex; });
+
+    if (!ranked.length) {
         parts.push('\n<CURRENT_STATUS_CENTER>\n(empty - initialize Scene Anchor this turn)\n</CURRENT_STATUS_CENTER>');
-        return parts.join('');
-    }
-
-    parts.push('\n<CURRENT_STATUS_CENTER>\n');
-    used = parts.join('').length;
-
-    tables.forEach(function(t) {
-        if (used >= OT_STATUS_MAX_INJECT_CHARS) return;
-        var block = '<StatusTable name="' + escapeStatusAttr(t.name) + '">\n' +
-            String(t.content || '') + '\n</StatusTable>\n';
-        var remain = OT_STATUS_MAX_INJECT_CHARS - used;
-        if (block.length > remain) block = block.slice(0, Math.max(0, remain));
-        if (block) {
-            parts.push(block);
-            used += block.length;
+    } else {
+        parts.push('\n<CURRENT_STATUS_CENTER>\n');
+        // Reserve enough room for XML closing and the omission note.
+        var budget = Math.max(0, OT_STATUS_MAX_INJECT_CHARS - 180);
+        ranked.forEach(function(entry) {
+            var t = entry.table, name = String(t.name || '');
+            var open = '<StatusTable name="' + escapeStatusAttr(name) + '"' +
+                (t.scope ? ' scope="' + escapeStatusAttr(t.scope) + '"' : '') +
+                (t.scope === 'character' && t.character ? ' character="' + escapeStatusAttr(t.character) + '"' : '') + '>\n';
+            var close = '\n</StatusTable>\n';
+            var content = String(t.content || '');
+            var required = open.length + content.length + close.length;
+            var available = budget - parts.join('').length;
+            if (required <= available) {
+                parts.push(open + content + close);
+                diagnostics.included.push(name);
+                return;
+            }
+            // High-priority current scene/player/active actor: keep well-formed
+            // tags and trim only at a line boundary when possible.
+            var marker = '\n[此表因上下文预算限制而部分省略；请勿猜测缺失内容]';
+            var capacity = available - open.length - close.length - marker.length;
+            if (entry.rank <= 2 && capacity >= 100) {
+                var slice = content.slice(0,capacity);
+                var lastLine = slice.lastIndexOf('\n');
+                if (lastLine > 80) slice = slice.slice(0,lastLine);
+                parts.push(open + slice + marker + close);
+                diagnostics.truncated.push(name);
+            } else {
+                diagnostics.omitted.push(name);
+            }
+        });
+        if (diagnostics.omitted.length) {
+            parts.push('[本轮未注入的状态表：' + diagnostics.omitted.slice(0,12).join('、') +
+                (diagnostics.omitted.length > 12 ? ' 等' : '') +
+                '。不要推断它们的内容；必要时用户可在状态中心查看。]\n');
         }
-    });
-    parts.push('</CURRENT_STATUS_CENTER>');
+        parts.push('</CURRENT_STATUS_CENTER>');
+    }
+    diagnostics.estimatedChars = parts.join('').length;
+    if (conv.id) statusPromptDiagnostics[conv.id] = diagnostics;
     return parts.join('');
+}
+
+function getStatusPanels(conv) {
+    if (!conv) return { conversationId: null, user: null, characters: [] };
+    var tables = getStatusCenterTables(conv);
+    var group = isGroupChat(conv) ? getGroupMembers(conv).map(function(x) { return x.character; }) : [];
+    var chars = group.length ? group : (conv.character ? [conv.character] : []);
+    var members = chars.filter(Boolean).map(function(c) { return String(c.name || '').trim(); }).filter(Boolean);
+    var userName = state.settings && state.settings.userName ? String(state.settings.userName) : '玩家';
+    var persona = conv.userPersonaId && typeof getUserPersonaById === 'function'
+        ? getUserPersonaById(conv.userPersonaId) : null;
+    if (persona && persona.userName) userName = persona.userName;
+    var userTables = tables.filter(function(t) {
+        return t.scope === 'user' || (!t.scope && /^(玩家状态|用户状态|User Status)$/i.test(t.name));
+    });
+    var charPanels = members.map(function(name) {
+        var namedTables = tables.filter(function(t) {
+            if (t.scope === 'character') return String(t.character || '') === name;
+            if (t.scope) return false;
+            return t.name === '角色状态 · ' + name || t.name === '人物状态 · ' + name ||
+                t.name === '角色状态：' + name || t.name === '角色状态:' + name;
+        });
+        // Legacy mixed table: show only lines starting with an exact character name.
+        // Unknown rows stay in the existing generic Status Center, never misattribute.
+        if (!namedTables.length) {
+            tables.filter(function(t) { return !t.scope && t.name === '状态表'; }).forEach(function(t) {
+                var lines = String(t.content || '').split(/\r?\n/).filter(function(line) {
+                    var trimmed = line.trim();
+                    return trimmed.startsWith(name + ' |') || trimmed.startsWith(name + '|') ||
+                        trimmed.startsWith(name + '：') || trimmed.startsWith(name + ':');
+                });
+                if (lines.length) namedTables.push({ name: t.name, content: lines.join('\n'), updated: t.updated, revision: t.revision });
+            });
+        }
+        return { name: name, content: namedTables.map(function(t) { return t.content; }).join('\n\n'),
+            tables: namedTables.map(function(t) { return t.name; }) };
+    });
+    return { conversationId: conv.id || null, user: { name: userName,
+            content: userTables.map(function(t) { return t.content; }).join('\n\n'),
+            tables: userTables.map(function(t) { return t.name; }) },
+        characters: charPanels };
 }
 
 window.OpenTavernStatusCenterRuntime = {
@@ -14598,6 +15017,163 @@ window.OpenTavernStatusCenterRuntime = {
             conversationId: conv.id || null,
             tables: getStatusCenterTables(conv)
         };
+    },
+    listTableHistory: function(tableName) {
+        return getStatusCenterHistory(getActiveConv(), String(tableName || ''));
+    },
+    getPanels: function() {
+        return getStatusPanels(getActiveConv());
+    },
+    getPromptDiagnostics: function() {
+        var conv = getActiveConv();
+        return conv && conv.id ? JSON.parse(JSON.stringify(statusPromptDiagnostics[conv.id] || null)) : null;
+    },
+    getFullPromptDiagnostics: function() {
+        return getPromptBuildDiagnostics(getActiveConv());
+    },
+    listPinnedMemories: function(){return readPinnedMemories(getActiveConv());},
+    addPinnedMemory: function(id,text){return addPinnedMemory(id,text);},
+    deletePinnedMemory: function(id){return deletePinnedMemory(id);},
+    listAutoMemories: function(){return readAutoMemories(getActiveConv());},
+    isAutoMemoryEnabled: function(){var c=getActiveConv();return !!(c&&c.autoMemoryEnabled===true);},
+    setAutoMemoryEnabled: function(enabled){return setAutoMemoryEnabled(enabled);},
+    deleteAutoMemory: function(id){return deleteAutoMemory(id);},
+    restoreRevision: function(tableName, revision) {
+        return restoreStatusCenterRevision(getActiveConv(), String(tableName || ''), revision);
+    }
+};
+
+// Per-conversation inert text shortcuts. No script execution or global state.
+window.WuuQuickReplyRuntime = {
+    conversationId: function() { var c=getActiveConv();return c?c.id:null; },
+    list: function() {
+        var c=getActiveConv();
+        return c&&Array.isArray(c.quickReplies)?cloneJsonData(c.quickReplies):[];
+    },
+    upsert: async function(chatId,item) {
+        var c=getActiveConv();
+        if(!c||state.isGenerating||c.id!==chatId)return {ok:false,error:'请返回原对话，停止生成后重试。'};
+        var title=String(item&&item.title||'').trim().slice(0,32);
+        var text=String(item&&item.text||'').trim().slice(0,2400);
+        if(!title||!text)return {ok:false,error:'标题与内容均不能为空。'};
+        if(!Array.isArray(c.quickReplies))c.quickReplies=[];
+        var before=cloneJsonData(c.quickReplies);
+        var id=item&&item.id?String(item.id):makeId();
+        var hit=c.quickReplies.find(function(x){return x&&x.id===id;});
+        if(!hit&&c.quickReplies.length>=20)return {ok:false,error:'每场对话最多20条快捷语。'};
+        if(hit){hit.title=title;hit.text=text;}
+        else c.quickReplies.push({id:id,title:title,text:text,createdAt:Date.now()});
+        c.updated=Date.now();
+        var ok=await persistState(true);
+        if(!ok){c.quickReplies=before;return {ok:false,error:'保存失败，修改已撤销。'};}
+        return {ok:true,id:id};
+    },
+    remove: async function(chatId,id) {
+        var c=getActiveConv();
+        if(!c||state.isGenerating||c.id!==chatId)return {ok:false,error:'对话切换或仍在生成。'};
+        var before=cloneJsonData(c.quickReplies||[]);
+        c.quickReplies=before.filter(function(x){return x&&x.id!==id;});
+        var ok=await persistState(true);
+        if(!ok){c.quickReplies=before;return {ok:false,error:'保存失败，删除已撤销。'};}
+        return {ok:true};
+    },
+    insert: function(chatId,id) {
+        var c=getActiveConv();
+        if(!c||state.isGenerating||c.id!==chatId||!dom.messageInput)return false;
+        var item=(c.quickReplies||[]).find(function(x){return x&&x.id===id;});
+        if(!item)return false;
+        var field=dom.messageInput;
+        field.value+=(field.value&&!/\s$/.test(field.value)?'\n':'')+item.text;
+        field.dispatchEvent(new Event('input',{bubbles:true}));
+        closeComposerPlusMenu();
+        field.focus();
+        return true;
+    }
+};
+
+function listStoryBranchChildren(parentId){
+    if(!parentId)return [];
+    return (state.conversationOrder||[]).map(function(id){return state.conversations[id];})
+        .filter(function(c){return c&&c.branchMeta&&c.branchMeta.parentId===parentId;})
+        .sort(function(a,b){return (Number(b.updated)||0)-(Number(a.updated)||0);});
+}
+function getStoryBranchNavigationInfo(){
+    var c=getActiveConv();
+    if(!c)return {conversationId:null,parent:null,children:[],forward:null};
+    var parent=c.branchMeta&&c.branchMeta.parentId?state.conversations[c.branchMeta.parentId]:null;
+    var children=listStoryBranchChildren(c.id);
+    var remembered=c.branchNavigation&&c.branchNavigation.lastChildId
+        ? state.conversations[c.branchNavigation.lastChildId]:null;
+    if(remembered&&(!remembered.branchMeta||remembered.branchMeta.parentId!==c.id))remembered=null;
+    var forward=remembered||children[0]||null;
+    return {
+        conversationId:c.id,
+        parent:parent?{id:parent.id,title:parent.title||'父分支'}:null,
+        children:children.map(function(x){return {id:x.id,title:x.title||'剧情分支'};}),
+        forward:forward?{id:forward.id,title:forward.title||'剧情分支'}:null
+    };
+}
+async function navigateStoryBranch(direction){
+    if(state.isGenerating)return {ok:false,error:'生成期间不能切换剧情分支。'};
+    var current=getActiveConv(),info=getStoryBranchNavigationInfo(),target=null;
+    if(!current)return {ok:false,error:'当前没有对话。'};
+    if(direction==='back'){
+        target=info.parent&&state.conversations[info.parent.id];
+        if(!target)return {ok:false,error:'当前已经是这条剧情线的根节点。'};
+        if(!target.branchNavigation||typeof target.branchNavigation!=='object')target.branchNavigation={};
+        target.branchNavigation.lastChildId=current.id;
+        target.branchNavigation.updatedAt=Date.now();
+    }else if(direction==='forward'){
+        target=info.forward&&state.conversations[info.forward.id];
+        if(!target)return {ok:false,error:'没有可返回的子剧情分支。'};
+    }else return {ok:false,error:'未知的分支导航方向。'};
+    var saved=await persistState(true);
+    if(saved===false)return {ok:false,error:'分支导航记录保存失败，未切换。'};
+    await loadConversation(target.id);
+    return {ok:true,conversationId:target.id};
+}
+window.WuuBranchRuntime={
+    info:getStoryBranchNavigationInfo,
+    back:function(){return navigateStoryBranch('back');},
+    forward:function(){return navigateStoryBranch('forward');}
+};
+
+window.WuuChatImageRuntime = {
+    conversationId: function() { var c=getActiveConv();return c?c.id:null; },
+    list: function() {
+        var c=getActiveConv(),list=[];
+        if(!c||!Array.isArray(c.messages))return list;
+        c.messages.forEach(function(m){
+            if(!m||!m.id||!Array.isArray(m.attachments))return;
+            m.attachments.forEach(function(att,i){
+                if(!att||att.type!=='image')return;
+                var src=String(att.dataUrl||att.url||'');
+                if(!isSafeChatImageSource(src))return;
+                list.push({messageId:m.id,index:i,src:src,
+                    name:String(att.name||att.source||'图片').slice(0,90)});
+            });
+        });
+        return list.slice(-60).reverse();
+    },
+    attach: async function(chatId,targetIndex,msgId,imageIndex){
+        var c=getActiveConv();
+        if(!c||c.id!==chatId||state.isGenerating)return {ok:false,error:'当前对话已切换或正在生成。'};
+        var target=c.messages&&c.messages[targetIndex];
+        var source=c.messages.find(function(m){return m&&m.id===msgId;});
+        var att=source&&source.attachments&&source.attachments[imageIndex];
+        if(!target||!att||att.type!=='image'||!isSafeChatImageSource(att.dataUrl||att.url))
+            return {ok:false,error:'图片不存在或格式不受支持。'};
+        if(!Array.isArray(target.attachments))target.attachments=[];
+        if(target.attachments.length>=12)return {ok:false,error:'单条消息最多12张图片。'};
+        var copy=cloneJsonData(att);
+        copy.source='chat_embed';
+        copy.createdAt=Date.now();
+        target.attachments.push(copy);
+        c.updated=Date.now();
+        var ok=await persistState(true);
+        if(!ok){target.attachments.pop();return {ok:false,error:'保存失败，引用已撤销。'};}
+        requestRender('activeConvId');
+        return {ok:true};
     }
 };
 
@@ -18640,6 +19216,22 @@ function buildMessagesForAPI(generationType) {
 
     // Activate World Info for this conversation
     var wiResult = getActivatedWorldInfo(conv);
+    var promptDiagnostic = {
+        builtAt: Date.now(),
+        generationType: generationType,
+        completionSource: resolveCompletionSource(state.settings, {}),
+        includeReasoningInHistory: state.settings.includeReasoningInHistory === true,
+        worldInfo: (wiResult.entries || []).slice(0, 80).map(function(entry) {
+            return {
+                uid: entry && entry.uid != null ? String(entry.uid) : '',
+                label: String(entry && (entry.comment || entry.name || (Array.isArray(entry.key) && entry.key[0]) || entry.uid) || '未命名条目').slice(0, 120),
+                estimatedTokens: estimateTokens(String(entry && entry.content || '')),
+                position: entry && entry.position != null ? entry.position : null,
+                constant: !!(entry && entry.constant)
+            };
+        }),
+        worldInfoBudgetTrimmed: !!conv._wiBudgetWarning
+    };
     var wiByPos = formatWorldInfoEntriesForPrompt(wiResult.byPosition || {}, currentChar, conv);
     var wiOutlets = formatWorldInfoEntriesForPrompt(wiResult.outlets || {}, currentChar, conv);
     var summaryMessages = [];
@@ -18688,6 +19280,14 @@ function buildMessagesForAPI(generationType) {
             historyContent = stripStatusTransportForDisplay(historyContent, true);
         }
         var copy = { role: m.role, content: historyContent };
+        if (String(m.role || '').toLowerCase() === 'assistant' && state.settings.includeReasoningInHistory === true) {
+            var histSource = resolveCompletionSource(state.settings, {});
+            if (histSource === 'deepseek' && m.cot) copy._reasoningContent = String(m.cot);
+            if (histSource === 'openrouter' && m.reasoningMeta && m.reasoningMeta.structuredReasoningComplete &&
+                Array.isArray(m.reasoningMeta.reasoningDetails) && m.reasoningMeta.reasoningDetails.length) {
+                copy._reasoningDetails = cloneJsonData(m.reasoningMeta.reasoningDetails);
+            }
+        }
         if (String(m.role || '').toLowerCase() === 'user') {
             var images = getUserVisionAttachments(m);
             if (images.length) copy._userImages = images;
@@ -18811,9 +19411,15 @@ function buildMessagesForAPI(generationType) {
         };
         if (m._isDialogueExample) message._isDialogueExample = true;
         if (m._userImages && m._userImages.length) message._userImages = m._userImages;
+        if (m._reasoningContent) message.reasoning_content = m._reasoningContent;
+        if (m._reasoningDetails && m._reasoningDetails.length) message.reasoning_details = cloneJsonData(m._reasoningDetails);
         return message;
     });
 
+    var pinnedMemoryMessage = buildPinnedMemoryPrompt(conv);
+    if(pinnedMemoryMessage)apiMessages.push({role:'system',content:pinnedMemoryMessage});
+    var autoMemoryMessage = buildAutoMemoryPrompt(conv);
+    if(autoMemoryMessage)apiMessages.push({role:'system',content:autoMemoryMessage});
     var statusCenterRuntimeMessage = buildStatusCenterRuntimeMessage(conv);
     if (statusCenterRuntimeMessage) {
         apiMessages.push({ role: 'system', content: statusCenterRuntimeMessage });
@@ -18826,6 +19432,22 @@ function buildMessagesForAPI(generationType) {
             content: applySillyTavernPromptMacros(preset.assistantPrefill, macroEnv)
         });
     }
+    var roleTotals = { system:0, user:0, assistant:0, other:0 };
+    var estimatedTotal = 0;
+    apiMessages.forEach(function(message) {
+        var role = String(message && message.role || 'other').toLowerCase();
+        if (!Object.prototype.hasOwnProperty.call(roleTotals, role)) role = 'other';
+        var contentText = getMessagePlainText(message && message.content);
+        var tokens = estimateTokens(contentText);
+        roleTotals[role] += tokens;
+        estimatedTotal += tokens;
+    });
+    promptDiagnostic.messageCount = apiMessages.length;
+    promptDiagnostic.estimatedTokens = estimatedTotal;
+    promptDiagnostic.roleEstimatedTokens = roleTotals;
+    promptDiagnostic.statusCenter = conv.id && statusPromptDiagnostics[conv.id]
+        ? cloneJsonData(statusPromptDiagnostics[conv.id]) : null;
+    if (conv.id) promptBuildDiagnostics[conv.id] = promptDiagnostic;
     return applyUserImagesToApiMessages(apiMessages, 4);
 }
 
@@ -18866,6 +19488,44 @@ function buildMessagesForContinue() {
         messages.push({ role: 'assistant', content: replacePlaceholders(preset.assistantPrefill, charName, userName) });
     }
     return messages;
+}
+
+function getPromptBuildDiagnostics(conv) {
+    if (!conv || !conv.id) return null;
+    return promptBuildDiagnostics[conv.id] ? cloneJsonData(promptBuildDiagnostics[conv.id]) : null;
+}
+
+function formatPromptDiagnostics(conv, messages) {
+    var d = getPromptBuildDiagnostics(conv);
+    if (!d) return '';
+    var roles = d.roleEstimatedTokens || {};
+    var lines = [
+        '=== PROMPT DIAGNOSTICS（估算，不是服务商账单 token）===',
+        '聊天补全来源: ' + String(d.completionSource || 'generic'),
+        '历史推理回传: ' + (d.includeReasoningInHistory ? 'ON（仅协议支持时）' : 'OFF'),
+        '消息数: ' + (d.messageCount || (messages || []).length),
+        '估算总 tokens: ~' + (d.estimatedTokens || 0),
+        '角色分布: system ~' + (roles.system || 0) + ' / user ~' + (roles.user || 0) +
+            ' / assistant ~' + (roles.assistant || 0)
+    ];
+    var wi = Array.isArray(d.worldInfo) ? d.worldInfo : [];
+    lines.push('世界书激活: ' + wi.length + (d.worldInfoBudgetTrimmed ? '（预算发生裁剪）' : ''));
+    wi.slice(0, 24).forEach(function(entry) {
+        lines.push('  - ' + entry.label + ' ~' + entry.estimatedTokens + ' tok' +
+            (entry.constant ? ' [constant]' : ''));
+    });
+    if (wi.length > 24) lines.push('  - …其余 ' + (wi.length - 24) + ' 条未展开');
+    var st = d.statusCenter;
+    if (st) {
+        lines.push('状态中心注入: included=' + (st.included || []).length +
+            ' / truncated=' + (st.truncated || []).length +
+            ' / omitted=' + (st.omitted || []).length +
+            ' / chars=' + (st.estimatedChars || 0) + '/' + (st.limit || 0));
+        if (st.truncated && st.truncated.length) lines.push('  截断: ' + st.truncated.join('、'));
+        if (st.omitted && st.omitted.length) lines.push('  省略: ' + st.omitted.join('、'));
+    }
+    lines.push('=== ACTUAL PROMPT ===');
+    return lines.join('\n') + '\n\n';
 }
 
 function formatPromptMessages(messages) {
@@ -21170,8 +21830,24 @@ function processTimedEffects(conv, activatedEntries) {
 }
 
 // ==================== API Client ====================
+var promptBuildDiagnostics = Object.create(null);
+
+function reasoningDetailsToText(details) {
+    if (!Array.isArray(details)) return '';
+    return details.map(function(part) {
+        if (!part) return '';
+        if (typeof part === 'string') return part;
+        if (typeof part.text === 'string') return part.text;
+        if (typeof part.content === 'string') return part.content;
+        if (part.summary && typeof part.summary === 'string') return part.summary;
+        return '';
+    }).filter(Boolean).join('');
+}
+
 function extractCotDelta(delta) {
     if (!delta) return '';
+    var fromDetails = reasoningDetailsToText(delta.reasoning_details);
+    if (fromDetails) return fromDetails;
     var val = delta.reasoning_content || delta.reasoning || delta.thinking || delta.cot;
     if (typeof val === 'string') return val;
     if (val && typeof val.content === 'string') return val.content;
@@ -21794,11 +22470,11 @@ function createStreamLifecycle(onToken, onComplete, onError) {
         }
     }
 
-    function settle(kind, a, b, c) {
+    function settle(kind, a, b, c, d) {
         if (settled) return;
         settled = true;
         clearIdleTimers();
-        if (kind === 'complete') onComplete(a, b, c);
+        if (kind === 'complete') onComplete(a, b, c, d);
         else onError(a);
     }
 
@@ -21851,10 +22527,10 @@ function createStreamLifecycle(onToken, onComplete, onError) {
             fullCot = cot == null ? fullCot : String(cot);
             onToken(token, fullContent, fullCot);
         },
-        complete: function(content, cot, usage) {
+        complete: function(content, cot, usage, meta) {
             if (content != null) fullContent = String(content);
             if (cot != null) fullCot = String(cot);
-            settle('complete', fullContent, fullCot, usage);
+            settle('complete', fullContent, fullCot, usage, meta);
         },
         error: function(err) {
             settle('error', err);
@@ -21915,7 +22591,7 @@ function shouldRetryStreamAsNonStream(status, text) {
 
 function parseChatCompletionBody(text) {
     var raw = text == null ? '' : String(text).replace(/^\uFEFF/, '');
-    var result = { content: '', finishReason: '', errorMessage: '', html: false, gzip: false, data: null };
+    var result = { content: '', finishReason: '', errorMessage: '', html: false, gzip: false, data: null, reasoningDetails: null };
     if (!raw) return result;
     if (raw.charCodeAt(0) === 0x1f) {
         result.gzip = true;
@@ -21937,6 +22613,9 @@ function parseChatCompletionBody(text) {
             if (choice) {
                 if (choice.finish_reason) result.finishReason = String(choice.finish_reason);
                 if (choice.message && choice.message.content != null) result.content = String(choice.message.content);
+                if (choice.message && Array.isArray(choice.message.reasoning_details)) {
+                    result.reasoningDetails = cloneJsonData(choice.message.reasoning_details);
+                }
             }
             if (result.content || result.errorMessage || choice) return result;
         } catch (e) {}
@@ -21982,6 +22661,79 @@ function rememberBufferedStreamProgress(content, cot) {
         var ui = noteActiveStreamUiState(conv, content, label, cot);
         updateStreamingDraftInMemory(conv, ui);
     } catch (e) {}
+}
+
+function normalizeCompletionSource(value) {
+    var v = String(value || '').trim().toLowerCase();
+    return ['auto','openai','openrouter','deepseek','generic'].indexOf(v) >= 0 ? v : 'auto';
+}
+
+function detectCompletionSource(endpoint, model) {
+    var url = String(endpoint || '').toLowerCase();
+    var name = String(model || '').toLowerCase();
+    if (url.indexOf('openrouter.ai') >= 0) return 'openrouter';
+    if (url.indexOf('api.deepseek.com') >= 0 || name.indexOf('deepseek-') === 0) return 'deepseek';
+    if (url.indexOf('api.openai.com') >= 0) return 'openai';
+    return 'generic';
+}
+
+function resolveCompletionSource(settings, requestOptions) {
+    settings = settings || {};
+    requestOptions = requestOptions || {};
+    var selected = normalizeCompletionSource(
+        requestOptions.completionSource != null ? requestOptions.completionSource : settings.completionSource
+    );
+    return selected === 'auto'
+        ? detectCompletionSource(requestOptions.apiEndpoint || settings.apiEndpoint, requestOptions.model || settings.model)
+        : selected;
+}
+
+function updateCompletionSourceHint() {
+    if (!dom || !dom.completionSourceHint) return;
+    var selected = dom.completionSource ? normalizeCompletionSource(dom.completionSource.value) : 'auto';
+    var effective = selected === 'auto'
+        ? detectCompletionSource(dom.apiEndpoint ? dom.apiEndpoint.value : state.settings.apiEndpoint,
+            dom.modelName ? dom.modelName.value : state.settings.model)
+        : selected;
+    var labels = { openai:'OpenAI', openrouter:'OpenRouter', deepseek:'DeepSeek', generic:'通用兼容' };
+    var note = effective === 'openrouter'
+        ? '使用 OpenRouter reasoning 参数并解析 reasoning / reasoning_details。'
+        : effective === 'deepseek'
+        ? '使用 DeepSeek reasoning_effort / thinking，并解析 reasoning_content。'
+        : effective === 'openai'
+        ? '使用 OpenAI 风格 reasoning_effort；不会发送 Anthropic thinking 对象。'
+        : '保留原有通用兼容行为，同时发送用户明确开启的 reasoning_effort / thinking。';
+    dom.completionSourceHint.textContent = '当前有效来源：' + (labels[effective] || effective) + '。' + note;
+}
+
+function applyCompletionSourceReasoning(payload, settings, requestOptions, captureCot) {
+    var source = resolveCompletionSource(settings, requestOptions);
+    // Start from a clean provider-specific shape. Generic deliberately keeps the old compatibility behavior.
+    if (source === 'openrouter') {
+        delete payload.reasoning_effort;
+        delete payload.thinking;
+        var orEffort = resolveReasoningEffortForRequest(settings, requestOptions);
+        if (orEffort) payload.reasoning = { effort: orEffort };
+        else delete payload.reasoning;
+        if (captureCot) payload.include_reasoning = true;
+        else delete payload.include_reasoning;
+    } else if (source === 'deepseek') {
+        delete payload.reasoning;
+        delete payload.include_reasoning;
+        applyReasoningEffortToPayload(payload, settings, requestOptions);
+        applyThinkingToPayload(payload, settings, requestOptions);
+    } else if (source === 'openai') {
+        delete payload.reasoning;
+        delete payload.include_reasoning;
+        delete payload.thinking;
+        applyReasoningEffortToPayload(payload, settings, requestOptions);
+    } else {
+        delete payload.reasoning;
+        delete payload.include_reasoning;
+        applyReasoningEffortToPayload(payload, settings, requestOptions);
+        applyThinkingToPayload(payload, settings, requestOptions);
+    }
+    return source;
 }
 
 function normalizeReasoningEffortLevel(value) {
@@ -22109,8 +22861,7 @@ function streamChatWithMessages(messages, onToken, onComplete, onError, requestO
         top_p: typeof requestOptions.topP === 'number' ? requestOptions.topP : settings.topP,
         stream: useStream
     };
-    applyReasoningEffortToPayload(payload, settings, requestOptions);
-    applyThinkingToPayload(payload, settings, requestOptions);
+    var completionSource = applyCompletionSourceReasoning(payload, settings, requestOptions, captureCot);
     function applyStreamPayloadFlags(streamOn) {
         payload.stream = !!streamOn;
         if (payload.stream && !shouldUseOllamaCompat(settings.apiEndpoint) && !settings.ollamaCompatMode) {
@@ -22132,12 +22883,12 @@ function streamChatWithMessages(messages, onToken, onComplete, onError, requestO
         life.token(delta, content, cot);
     }
 
-    function completeWithParts(content, cot, usageMeta) {
+    function completeWithParts(content, cot, usageMeta, reasoningMeta) {
         if (life.isSettled()) return;
         finishGenerating();
         var parts = captureCot ? splitInlineCot(content || '', cot || '') : { content: content || '', cot: cot || '' };
         life.noteText(parts.content, parts.cot);
-        life.complete(parts.content, parts.cot, usageMeta);
+        life.complete(parts.content, parts.cot, usageMeta, reasoningMeta || { source: completionSource });
     }
 
     function failHttp(status, text) {
@@ -22196,7 +22947,11 @@ function streamChatWithMessages(messages, onToken, onComplete, onError, requestO
                 var parts = captureCot ? splitInlineCot(fullContent, fullCot) : { content: fullContent, cot: '' };
                 var elapsed = ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()) - nonStreamStartedAt;
                 var usageMeta = finalizeUsageMeta(parseApiUsage(parsed.data), elapsed);
-                completeWithParts(parts.content, parts.cot, usageMeta);
+                completeWithParts(parts.content, parts.cot, usageMeta, {
+                    source: completionSource,
+                    reasoningDetails: parsed.reasoningDetails && parsed.reasoningDetails.length ? parsed.reasoningDetails : null,
+                    structuredReasoningComplete: !!(parsed.reasoningDetails && parsed.reasoningDetails.length)
+                });
             });
         }).catch(function(e) {
             if (life.isSettled()) return;
@@ -22254,7 +23009,11 @@ function streamChatWithMessages(messages, onToken, onComplete, onError, requestO
             }
             var finalParts = captureCot ? splitInlineCot(fullContent, fullCot) : { content: fullContent, cot: '' };
             var usageMeta = finalizeUsageMeta(lastUsage, streamElapsedMs());
-            completeWithParts(finalParts.content, finalParts.cot, usageMeta);
+            completeWithParts(finalParts.content, finalParts.cot, usageMeta, {
+                source: completionSource,
+                reasoningDetails: null,
+                structuredReasoningComplete: false
+            });
         }
 
         function processLine(rawLine) {
@@ -22981,9 +23740,20 @@ function listConversationFavoriteEntries(conv) {
 function prepareResponseRegeneration(conv, msg) {
     if (!conv || !msg || !Array.isArray(conv.messages)) return null;
     syncActiveResponseVersion(conv, msg);
+    var beforeStatusCenter=cloneJsonData(conv.statusCenter||null);
     var insertIndex = conv.messages.indexOf(msg);
     if (insertIndex < 0) return null;
     var linked = msg.stage === 'second' ? [] : getLinkedSecondStageMessages(conv, msg);
+    // If an old reply was created before version snapshots existed, we can
+    // capture its state only when it is the latest narrative turn.
+    if (msg.stage !== 'second' && !conv.messages.slice(insertIndex + 1).some(function(m) {
+        return m && m.role === 'user';
+    })) {
+        var activeRecord = msg.responseVersions && msg.responseVersions[msg.activeResponseVersion];
+        if (activeRecord && !activeRecord.statusCenter && beforeStatusCenter) {
+            activeRecord.statusCenter = cloneJsonData(beforeStatusCenter);
+        }
+    }
     var originalMessages = [msg].concat(linked).map(function(item) { return cloneJsonData(item); });
     var pending = {
         targetId: msg.id,
@@ -22991,11 +23761,23 @@ function prepareResponseRegeneration(conv, msg) {
         insertIndex: insertIndex,
         responseVersions: cloneJsonData(msg.responseVersions),
         activeResponseVersion: msg.activeResponseVersion,
+        beforeStatusCenter:beforeStatusCenter,
         messages: originalMessages
     };
     conv._pendingResponseRegeneration = cloneJsonData(pending);
     if (msg.stage !== 'second') removeLinkedSecondStageMessages(conv, msg);
     var currentIndex = conv.messages.indexOf(msg);
+    // Candidate generation must start from the USER turn state, not the
+    // previously selected assistant answer's already-applied state.
+    if(msg.stage!=='second'&&currentIndex>=0){
+        var source=conv.messages.slice(0,currentIndex).reverse().find(function(m){return m&&m.role==='user';});
+        var baseline=source&&conv.storySnapshots&&conv.storySnapshots[source.id];
+        if(baseline&&baseline.statusCenter){
+            conv.statusCenter=cloneJsonData(baseline.statusCenter);
+            notifyStatusCenterUpdated(conv);
+        }
+    }
+    if(currentIndex>=0)invalidateStorySnapshotsAfter(conv,currentIndex);
     if (currentIndex >= 0) conv.messages.splice(currentIndex, 1);
     if (conv.mvu) rebuildMvuSnapshots(conv);
     return pending;
@@ -23857,7 +24639,7 @@ function updateStreamingBubble(fullContent, conv, label, fullCot, options, meta)
         );
     });
 }
-function finishAssistantMessage(conv, fullContent, speakerForMsg, stage, parentId, fullCot, usageMeta) {
+function finishAssistantMessage(conv, fullContent, speakerForMsg, stage, parentId, fullCot, usageMeta, reasoningMeta) {
     if (!conv || !fullContent) return null;
     var statusCenterResult = stage === 'second'
         ? { visibleText: stripStatusTransportForDisplay(fullContent, true), updates: [] }
@@ -23870,6 +24652,14 @@ function finishAssistantMessage(conv, fullContent, speakerForMsg, stage, parentI
     if (pending && pending.stage !== expectedStage) pending = null;
     var pushObj = { role: 'assistant', content: fullContent, id: pending ? pending.targetId : makeId(), createdAt: Date.now() };
     if (fullCot) pushObj.cot = fullCot;
+    if (reasoningMeta && typeof reasoningMeta === 'object') {
+        pushObj.reasoningMeta = {
+            source: String(reasoningMeta.source || resolveCompletionSource(state.settings, {})),
+            structuredReasoningComplete: !!reasoningMeta.structuredReasoningComplete,
+            reasoningDetails: reasoningMeta.structuredReasoningComplete && Array.isArray(reasoningMeta.reasoningDetails)
+                ? cloneJsonData(reasoningMeta.reasoningDetails) : null
+        };
+    }
     if (speakerForMsg) pushObj.speaker = speakerForMsg;
     if (stage) pushObj.stage = stage;
     if (parentId) pushObj.parentId = parentId;
@@ -23880,6 +24670,9 @@ function finishAssistantMessage(conv, fullContent, speakerForMsg, stage, parentI
     // Completed message replaces any in-progress draft.
     if (pushObj.incomplete) delete pushObj.incomplete;
     conv.messages.push(pushObj);
+    if(stage!=='second'&&statusCenterResult&&statusCenterResult.memories&&statusCenterResult.memories.length){
+        applyAutoMemories(conv,pushObj,statusCenterResult.memories);
+    }
     if (stage !== 'second' && statusCenterResult && statusCenterResult.updates && statusCenterResult.updates.length) {
         applyStatusCenterUpdates(conv, statusCenterResult.updates);
     }
@@ -23897,11 +24690,17 @@ function finishAssistantMessage(conv, fullContent, speakerForMsg, stage, parentI
     } else {
         ensureResponseVersions(conv, pushObj);
     }
+    // Immutable per-reply status snapshot: never overwrite it with later turns.
+    if (stage !== 'second' && pushObj.responseVersions[pushObj.activeResponseVersion]) {
+        pushObj.responseVersions[pushObj.activeResponseVersion].statusCenter =
+            cloneJsonData(conv.statusCenter || {version:2,tables:[],history:[]});
+    }
     if (parentId) {
         var parent = conv.messages.find(function(msg) { return msg && msg.id === parentId; });
         if (parent) syncActiveResponseVersion(conv, parent);
     }
     conv.updated = Date.now();
+    captureStorySnapshot(conv,pushObj);
     clearStreamingDraft(conv, true, streamGenerationId);
     emitTavernEvent(frontendEventNames.MESSAGE_RECEIVED, { chatId: conv.id, messageId: pushObj.id, message: cloneJsonData(pushObj) });
     appendFinalAssistantMessage(conv, fullContent, fullCot);
@@ -23976,11 +24775,11 @@ function runSecondStageGeneration(firstStageMessage, onDone) {
             function onToken(token, fullContent, fullCot) {
                 updateStreamingBubble(fullContent, conv, t('two_stage_sender') || '第二阶段', fullCot);
             },
-            function onComplete(fullContent, fullCot, usageMeta) {
+            function onComplete(fullContent, fullCot, usageMeta, reasoningMeta) {
                 var c = state.conversations && state.conversations[conv.id];
                 if (c && fullContent) {
                     var speaker = firstStageMessage.speaker || null;
-                    finishAssistantMessage(c, fullContent, speaker, 'second', firstStageMessage.id, fullCot, usageMeta);
+                    finishAssistantMessage(c, fullContent, speaker, 'second', firstStageMessage.id, fullCot, usageMeta, reasoningMeta);
                 } else if (c) {
                     clearStreamingDraft(c, true);
                     restoreFailedResponseRegeneration(c);
@@ -24054,7 +24853,7 @@ function completeGenerationTurn(conv) {
     }
 }
 
-function handlePrimaryAssistantComplete(fullContent, fullCot, usageMeta, expectedConv) {
+function handlePrimaryAssistantComplete(fullContent, fullCot, usageMeta, expectedConv, reasoningMeta) {
     var conv = expectedConv && state.conversations
         ? state.conversations[expectedConv.id]
         : getActiveConv();
@@ -24075,7 +24874,7 @@ function handlePrimaryAssistantComplete(fullContent, fullCot, usageMeta, expecte
     var speakerForMsg = isGroupChat(conv)
         ? (conv._nextGroupSpeaker ? conv._nextGroupSpeaker.name : getCurrentGeneratingSpeakerName(conv))
         : null;
-    var firstStageMsg = finishAssistantMessage(conv, fullContent, speakerForMsg, 'main', null, fullCot, usageMeta);
+    var firstStageMsg = finishAssistantMessage(conv, fullContent, speakerForMsg, 'main', null, fullCot, usageMeta, reasoningMeta);
     clearStreamingMessageDom();
 
     if (state.settings.twoStageEnabled && firstStageMsg) {
@@ -24815,6 +25614,88 @@ function openSummaryManager() {
     dom.summaryManagerModal.classList.remove('hidden');
 }
 
+// Explicit per-turn scene snapshots: never fabricate past state from today.
+var STORY_SNAPSHOT_LIMIT=40, STORY_SNAPSHOT_BYTES=100000;
+function invalidateStorySnapshotsAfter(conv,index) {
+    if(!conv||!conv.storySnapshots||!Array.isArray(conv.messages))return;
+    conv.messages.slice(Math.max(0,index)).forEach(function(m){
+        if(m&&m.id)delete conv.storySnapshots[m.id];
+    });
+}
+function captureStorySnapshot(conv,msg){
+    if(!conv||!msg||!msg.id)return false;
+    var snap={messageId:msg.id,at:Date.now(),
+        statusCenter:cloneJsonData(conv.statusCenter||{version:2,tables:[],history:[]}),
+        summaries:cloneJsonData(conv.summaries||[]),
+        authorsNote:cloneJsonData(conv.authorsNote||null),
+        mvu:cloneJsonData(conv.mvu||null),
+        worldInfo:cloneJsonData(conv.worldInfo||null),
+        worldBookIds:cloneJsonData(conv.worldBookIds||[]),
+        pinnedMemories:cloneJsonData(conv.pinnedMemories||[]),
+        userPersonaId:conv.userPersonaId||''};
+    if(JSON.stringify(snap).length>STORY_SNAPSHOT_BYTES)return false;
+    if(!conv.storySnapshots||typeof conv.storySnapshots!=='object')conv.storySnapshots={};
+    conv.storySnapshots[msg.id]=snap;
+    var keys=Object.keys(conv.storySnapshots).sort(function(a,b){
+        return(Number(conv.storySnapshots[a].at)||0)-(Number(conv.storySnapshots[b].at)||0);
+    });
+    while(keys.length>STORY_SNAPSHOT_LIMIT)delete conv.storySnapshots[keys.shift()];
+    return true;
+}
+function renderStoryBranchAction(conv,msg,idx){
+    if(!conv||!msg||!msg.id||msg.role==='system')return '';
+    if(!(conv.storySnapshots&&conv.storySnapshots[msg.id])&&idx!==conv.messages.length-1)return '';
+    return '<button class="msg-action-btn" data-action="story-branch" data-msg-idx="'+idx+
+        '" title="从此消息创建剧情分支" aria-label="创建剧情分支">⑂</button>';
+}
+async function createStoryBranch(idx){
+    if(state.isGenerating)return;
+    var source=getActiveConv(),msg=source&&source.messages[idx];
+    if(!msg||!msg.id||msg.role==='system')return;
+    if(!(source.storySnapshots&&source.storySnapshots[msg.id])&&idx===source.messages.length-1)
+        captureStorySnapshot(source,msg);
+    var snapshot=source.storySnapshots&&source.storySnapshots[msg.id];
+    if(!snapshot){
+        await showGlassConfirm('此消息没有历史快照。旧消息不能用当前状态冒充历史状态，请从启用快照后的消息创建分支。',{showCancel:false});
+        return;
+    }
+    var title=await showGlassPrompt('将复制此消息以前的聊天，并恢复该时间点保存的状态、摘要和作者注释。原会话保持不变。',{
+        title:'创建剧情分支',input:{value:(source.title||'聊天')+' · 分支',maxLength:100}});
+    if(title===null||state.isGenerating||getActiveConv()!==source||source.messages[idx]!==msg)return;
+    var copy,fork;
+    try{copy=cloneJsonData(source);fork=cloneJsonData(snapshot);}catch(e){console.error(e);return;}
+    var id=makeId();
+    copy.id=id;copy.title=String(title).trim().slice(0,100)||'剧情分支';copy.titleCustom=true;
+    copy.created=Date.now();copy.updated=Date.now();
+    copy.branchMeta={parentId:source.id,parentMessageId:msg.id,parentIndex:idx,createdAt:copy.created};
+    copy.messages=copy.messages.slice(0,idx+1);
+    copy.statusCenter=fork.statusCenter;
+    copy.summaries=fork.summaries;
+    copy.authorsNote=fork.authorsNote;
+    copy.mvu=fork.mvu;
+    copy.worldInfo=fork.worldInfo;
+    copy.worldBookIds=fork.worldBookIds;
+    copy.pinnedMemories=fork.pinnedMemories||[];
+    copy.userPersonaId=fork.userPersonaId;
+    var eligible=new Set(copy.messages.map(function(m){return m.id;}));
+    Object.keys(copy.storySnapshots||{}).forEach(function(k){
+        if(!eligible.has(k))delete copy.storySnapshots[k];
+    });
+    delete copy._wiCache;delete copy._pendingResponseRegeneration;
+    copy._lastRenderedVisibleCount=0;copy._showAllMessages=false;
+    copy._historyWindow=150;copy._historyScrollHandler=null;
+    try{normalizeConversation(copy);}catch(err){console.error('[Branch] validation failed',err);return;}
+    state.conversations[id]=copy;state.conversationOrder.unshift(id);
+    var ok=await persistState(true);
+    if(!ok){
+        delete state.conversations[id];
+        state.conversationOrder=state.conversationOrder.filter(function(x){return x!==id;});
+        await showGlassConfirm('新分支保存失败，原对话仍保留。请先导出备份。',{showCancel:false});
+        return;
+    }
+    await loadConversation(id);
+}
+
 function archiveCurrentConversation() {
     var conv = getActiveConv();
     if (!conv) return;
@@ -24903,6 +25784,7 @@ function newConversation(charOrChars) {
     normalizeConversation(conv);
     linkConversationCharacterWorldBooks(conv);
     initializeMvuConversation(conv, false);
+    if(conv.messages.length)captureStorySnapshot(conv,conv.messages[conv.messages.length-1]);
 
     state.conversations[conv.id] = conv;
     state.conversationOrder.unshift(conv.id);
@@ -28465,7 +29347,7 @@ function cacheDom() {
         'ttsEnabled','ttsProvider','ttsApiEndpoint','ttsApiKey','saveTtsApiKey','ttsApiTestResult','downloadTtsWorkerBtn','ttsModel','ttsVoice','ttsSpeed','ttsSpeedVal','ttsStream','ttsBrowserFallbackEnabled','ttsResponseFormat',
         'contextLength','contextLenVal',
         'maxTokens','maxTokensVal','temperature','tempVal','frequencyPenalty','freqPenaltyVal','presencePenalty','presPenaltyVal','topP','topPVal',
-        'userName','userPersonaSelect','userPersonaTitle','userPersonaAddBtn','userPersonaDupBtn','userPersonaDeleteBtn','systemPrompt','postHistoryInstructions','fillPostHistoryBtn','fillRoleplayPromptBtn','authorsNoteEnabled','authorsNoteText','authorsNotePosition','authorsNoteDepth','authorsNoteRole','authorsNoteInterval','twoStageEnabled','twoStageTemperature','twoStageTempVal','twoStageTopP','twoStageTopPVal','twoStageIncludeRecentContext','twoStageSystemPrompt','twoStagePostHistoryInstructions','restoreTwoStagePromptBtn','requestCotEnabled','showCotEnabled','reasoningEffortEnabled','reasoningEffort','thinkingEnabled','thinkingType','userDescription',
+        'userName','userPersonaSelect','userPersonaTitle','userPersonaAddBtn','userPersonaDupBtn','userPersonaDeleteBtn','systemPrompt','postHistoryInstructions','fillPostHistoryBtn','fillRoleplayPromptBtn','authorsNoteEnabled','authorsNoteText','authorsNotePosition','authorsNoteDepth','authorsNoteRole','authorsNoteInterval','twoStageEnabled','twoStageTemperature','twoStageTempVal','twoStageTopP','twoStageTopPVal','twoStageIncludeRecentContext','twoStageSystemPrompt','twoStagePostHistoryInstructions','restoreTwoStagePromptBtn','requestCotEnabled','showCotEnabled','completionSource','completionSourceHint','includeReasoningInHistory','reasoningEffortEnabled','reasoningEffort','thinkingEnabled','thinkingType','userDescription',
         'stPresetImportBtn','stPresetExportBtn','stPresetDeleteBtn','stPresetRefreshBtn','stPresetAddBtn','stPresetImportFile','stPresetStatus','stPresetTokenCount','stPresetSelect','stPresetSquashBtn','stPresetSquashSystemMessages','stPresetList',
         'stPromptEditor','stPromptEditorName','stPromptEditorRole','stPromptEditorPlacement','stPromptEditorDepth','stPromptEditorContent','stPromptEditorDynamicHint','stPromptEditorDeleteBtn','stPromptEditorCancelBtn','stPromptEditorSaveBtn',
         'importModal','importBackdrop','importCloseBtn','importFileInput','importStatus',
@@ -30459,6 +31341,9 @@ function renderMessages() {
                             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                         </button>
                         ${renderFavoriteStarHtml(msg, actualIdx)}
+                        ${renderChatImageAction(actualIdx)}
+                        ${renderPinMemoryAction(actualIdx)}
+                        ${renderStoryBranchAction(conv,msg,actualIdx)}
                         ${renderSpeakButton(actualIdx)}
                         <button class="msg-action-btn edit-btn" data-action="edit" data-msg-idx="${actualIdx}" title="${t('edit_msg')}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
                         ${isUser ? renderMessageEditedLabel(msg) : ''}
@@ -30514,6 +31399,9 @@ function renderMessages() {
         html += renderGreetingSwipeControls(msg, actualIdx);
         html += '<button class="msg-action-btn copy-btn" data-action="copy" data-msg-idx="' + actualIdx + '" title="' + t('copy') + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>';
         html += renderFavoriteStarHtml(msg, actualIdx);
+        html += renderChatImageAction(actualIdx);
+        html += renderPinMemoryAction(actualIdx);
+        html += renderStoryBranchAction(conv,msg,actualIdx);
         html += renderSpeakButton(actualIdx);
         html += '<button class="msg-action-btn edit-btn" data-action="edit" data-msg-idx="' + actualIdx + '" title="' + t('edit_msg') + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>';
         if (isUser) html += renderMessageEditedLabel(msg);
@@ -30588,6 +31476,9 @@ function renderMessagesFullHistory(conv) {
         html += renderGreetingSwipeControls(msg, actualIdx);
         html += '<button class="msg-action-btn copy-btn" data-action="copy" data-msg-idx="' + actualIdx + '" title="' + t('copy') + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>';
         html += renderFavoriteStarHtml(msg, actualIdx);
+        html += renderChatImageAction(actualIdx);
+        html += renderPinMemoryAction(actualIdx);
+        html += renderStoryBranchAction(conv,msg,actualIdx);
         html += renderSpeakButton(actualIdx);
         html += '<button class="msg-action-btn edit-btn" data-action="edit" data-msg-idx="' + actualIdx + '" title="' + t('edit_msg') + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>';
         if (isUser) html += renderMessageEditedLabel(msg);
@@ -34477,6 +35368,78 @@ function renderAssistantContent(text, context) {
     return html;
 }
 
+function renderChatImageAction(idx) {
+    return '<button class="msg-action-btn" data-action="attach-image" data-msg-idx="' + idx +
+        '" title="插入图片" aria-label="插入图片">🖼</button>';
+}
+function isSafeChatImageSource(url) {
+    return /^https:\/\//i.test(String(url||'')) ||
+        /^data:image\/(?:png|jpe?g|webp|gif);base64,[a-z0-9+/=]+$/i.test(String(url||''));
+}
+async function insertChatImageAtMessage(idx) {
+    if (state.isGenerating) return;
+    var conv = getActiveConv(), msg = conv && conv.messages[idx];
+    if (!msg) return;
+    var url = await showGlassPrompt(
+        '输入 https 图片直链；输入 # 浏览本对话已有图片；留空选择本地图片。图片只显示在此消息内，不会自动发送给模型。',
+        { title:'插入聊天图片', input:{value:'',placeholder:'https://... / #图库 / 留空本地文件',maxLength:2000} }
+    );
+    if (url == null || getActiveConv() !== conv || state.isGenerating || !conv.messages.includes(msg)) return;
+    url = String(url).trim();
+    var attachment = null;
+    if (url) {
+        if (url === '#' || url.toLowerCase() === 'gallery') {
+            window.dispatchEvent(new CustomEvent('wuu-chat-image-gallery',{
+                detail:{conversationId:conv.id,targetIndex:idx}
+            }));
+            return;
+        }
+        if (!/^https:\/\//i.test(url)) {
+            await showGlassConfirm('图片地址必须以 https:// 开头。', {title:'图片地址无效',showCancel:false});
+            return;
+        }
+        attachment = {type:'image',source:'chat_embed',url:url,name:'聊天引用图片',createdAt:Date.now()};
+    } else {
+        var file = await new Promise(function(resolve) {
+            var input = document.createElement('input');
+            input.type='file';input.accept='image/jpeg,image/png,image/webp,image/gif';
+            input.hidden=true;document.body.appendChild(input);
+            var finished=false;
+            function done(f) {if(finished)return;finished=true;input.remove();resolve(f||null);}
+            input.addEventListener('change',function(){done(input.files && input.files[0]);},{once:true});
+            input.addEventListener('cancel',function(){done(null);},{once:true});
+            input.click();
+            setTimeout(function(){if(!finished)done(null);},120000);
+        });
+        if (!file) return;
+        try {
+            var out = await compressComposerImageBlob(file,file.name);
+            attachment = {type:'image',source:'chat_embed',dataUrl:out.dataUrl,mime:out.mime,
+                name:out.name,createdAt:Date.now()};
+        } catch(err) {
+            console.warn('[Chat Images] Failed import',err);
+            await showGlassConfirm('图片文件无法读取或超出大小限制。',{title:'上传失败',showCancel:false});
+            return;
+        }
+    }
+    if (state.isGenerating || getActiveConv() !== conv || !conv.messages.includes(msg)) return;
+    if (!isSafeChatImageSource(attachment.url || attachment.dataUrl)) return;
+    if (!Array.isArray(msg.attachments)) msg.attachments=[];
+    if (msg.attachments.length >= 12) {
+        await showGlassConfirm('每条消息最多附加12张图片。',{showCancel:false,title:'图片数量限制'});
+        return;
+    }
+    msg.attachments.push(attachment);
+    conv.updated=Date.now();
+    var saved=await persistState(true);
+    if (saved === false) {
+        msg.attachments.pop();
+        await showGlassConfirm('图片保存失败，已撤销本次插入；原消息未被修改。',{showCancel:false,title:'保存失败'});
+        return;
+    }
+    requestRender('activeConvId');
+}
+
 function renderMessageAttachments(msg) {
     if (!msg || !Array.isArray(msg.attachments) || msg.attachments.length === 0) return '';
     var html = '<div class="msg-attachments">';
@@ -34484,12 +35447,13 @@ function renderMessageAttachments(msg) {
         if (!att || att.type !== 'image') return;
         var src = att.dataUrl || att.url || '';
         if (!src) return;
+        if (att.source === 'chat_embed' && !isSafeChatImageSource(src)) return;
         var label = att.source === 'comfyui'
             ? 'ComfyUI'
             : (att.name || (typeof t === 'function' ? t('composer_image_source_user') : (att.source || 'Image')));
         var prompt = att.prompt ? String(att.prompt) : '';
         html += '<figure>';
-        html += '<img class="msg-attachment-image" src="' + escapeHtml(src) + '" alt="' + escapeHtml(label) + '" loading="lazy">';
+        html += '<img class="msg-attachment-image" src="' + escapeHtml(src) + '" alt="' + escapeHtml(label) + '" loading="lazy" referrerpolicy="no-referrer">';
         html += '<figcaption class="msg-attachment-caption">' + escapeHtml(label + (prompt ? ' · ' + prompt.slice(0, 180) : '')) + '</figcaption>';
         html += '</figure>';
     });
@@ -34672,7 +35636,7 @@ function openReplyHistory(actualIdx) {
     persistState();
 }
 
-function switchResponseVersion(actualIdx, versionIdx) {
+async function switchResponseVersion(actualIdx, versionIdx) {
     if (state.isGenerating) return;
     var conv = getActiveConv();
     if (!conv) return;
@@ -34684,6 +35648,24 @@ function switchResponseVersion(actualIdx, versionIdx) {
 
     var stableId = msg.id;
     var selected = versions[versionIdx];
+    // Never silently replay a historical answer over subsequent story turns.
+    if (msg.stage !== 'second' && conv.messages.slice(actualIdx + 1).some(function(m) {
+        return m && m.role === 'user';
+    })) {
+        await showGlassConfirm('后面已有剧情，请从这条消息创建新分支后再选择不同回复，防止后续状态与故事冲突。',{
+            title:'历史剧情保护',showCancel:false
+        });
+        return;
+    }
+    if (msg.stage !== 'second' && !selected.statusCenter) {
+        var proceed = await showGlassConfirm('旧版回复没有可信的状态快照。只能切换文本，不能安全恢复当时状态。继续吗？',{
+            title:'旧版回复',showCancel:true,okText:'仅切换文本'
+        });
+        if (!proceed || state.isGenerating || getActiveConv()!==conv ||
+            conv.messages[actualIdx]!==msg) return;
+    }
+    invalidatePinnedMemoriesAfter(conv,actualIdx);
+    invalidateStorySnapshotsAfter(conv,actualIdx);
     var restoredUser = restoreResponseUserVersion(conv, msg, selected);
     if (msg.stage !== 'second') removeLinkedSecondStageMessages(conv, msg);
 
@@ -34707,7 +35689,10 @@ function switchResponseVersion(actualIdx, versionIdx) {
         });
         conv.messages.splice.apply(conv.messages, [parentIdx + 1, 0].concat(restoredLinked));
     }
-
+    if (msg.stage !== 'second' && selected.statusCenter) {
+        conv.statusCenter = cloneJsonData(selected.statusCenter);
+        notifyStatusCenterUpdated(conv);
+    }
     conv.updated = Date.now();
     conv._wiCache = null;
     conv._lastRenderedVisibleCount = 0;
@@ -34715,10 +35700,16 @@ function switchResponseVersion(actualIdx, versionIdx) {
         invalidateConversationAfterUserEdit(conv, restoredUser.index);
     }
     if (conv.mvu) rebuildMvuSnapshots(conv);
-    persistState();
+    if (msg.stage !== 'second') captureStorySnapshot(conv,msg);
+    var saved = false;
+    try { saved = await persistState(true) === true; }
+    catch(err) { console.error('[Swipes] Save failed',err); }
     renderMessagesOnly();
     renderConversationListOnly();
     openReplyHistory(conv.messages.indexOf(msg));
+    if (!saved) await showGlassConfirm('回复已经在当前页面切换，但尚未成功保存。请立即导出备份，暂时不要关闭页面。',{
+        title:'存储异常',showCancel:false
+    });
 }
 
 async function requestDeleteMessage(actualIdx) {
@@ -34763,6 +35754,8 @@ function deleteMessage(actualIdx) {
     if (!conv) return;
     var msg = conv.messages[actualIdx];
     if (!msg) return;
+    invalidatePinnedMemoriesAfter(conv,actualIdx);
+    invalidateStorySnapshotsAfter(conv,actualIdx);
     var deletedMessageId = msg.id || msg.messageId || String(actualIdx);
     if (msg.role === 'user') {
         var deleteCount = 1;
@@ -34998,8 +35991,8 @@ function regenerateMessage(actualIdx) {
             function onToken(token, fullContent, fullCot) {
                 updateStreamingBubble(fullContent, conv, getCurrentGeneratingSpeakerName(conv), fullCot);
             },
-            function onComplete(fullContent, fullCot, usageMeta) {
-                handlePrimaryAssistantComplete(fullContent, fullCot, usageMeta, conv);
+            function onComplete(fullContent, fullCot, usageMeta, reasoningMeta) {
+                handlePrimaryAssistantComplete(fullContent, fullCot, usageMeta, conv, reasoningMeta);
             },
             function onError(err) {
                 state.isGenerating = false;
@@ -35501,8 +36494,8 @@ function generateAfterUserEdit(conv) {
             function onToken(token, fullContent, fullCot) {
                 updateStreamingBubble(fullContent, conv, getCurrentGeneratingSpeakerName(conv), fullCot);
             },
-            function onComplete(fullContent, fullCot, usageMeta) {
-                handlePrimaryAssistantComplete(fullContent, fullCot, usageMeta, conv);
+            function onComplete(fullContent, fullCot, usageMeta, reasoningMeta) {
+                handlePrimaryAssistantComplete(fullContent, fullCot, usageMeta, conv, reasoningMeta);
             },
             function onError(err) {
                 state.isGenerating = false;
@@ -35627,14 +36620,31 @@ function editMessage(actualIdx, triggerBtn) {
                 }
             }
 
+            invalidatePinnedMemoriesAfter(conv,actualIdx);
+            var userBaseSnapshot=conv.storySnapshots&&conv.storySnapshots[msg.id];
+            // Do not keep snapshots for messages whose text or descendants changed.
+            invalidateStorySnapshotsAfter(conv,actualIdx);
             selectOrCreateUserVersion(conv, msg, newVal);
             prepareUserEditRegeneration(conv, msg, actualIdx);
+            if(userBaseSnapshot&&userBaseSnapshot.statusCenter){
+                var pending=conv._pendingResponseRegeneration;
+                if(pending){
+                    pending.beforeStatusCenter=cloneJsonData(conv.statusCenter);
+                    pending.beforeSummaries=cloneJsonData(conv.summaries||[]);
+                }
+                conv.statusCenter=cloneJsonData(userBaseSnapshot.statusCenter);
+                conv.summaries=cloneJsonData(userBaseSnapshot.summaries||[]);
+                notifyStatusCenterUpdated(conv);
+            }
+            captureStorySnapshot(conv,msg);
             invalidateConversationAfterUserEdit(conv, actualIdx);
             conv.updated = Date.now();
             generateAfterUserEdit(conv);
             return;
         }
 
+        invalidatePinnedMemoriesAfter(conv,actualIdx);
+        invalidateStorySnapshotsAfter(conv,actualIdx);
         msg.content = newVal;
         msg.editedAt = Date.now();
         if (conv.mvu) rebuildMvuSnapshots(conv);
@@ -36152,6 +37162,7 @@ function sendMessage() {
     if (attachments.length) userMsg.attachments = attachments;
     conv.messages.push(userMsg);
     if (conv.mvu) rebuildMvuSnapshots(conv);
+    captureStorySnapshot(conv,userMsg);
     conv.updated = Date.now();
     conv._wiBudgetWarning = false; // clear previous budget warning on new turn
     if (isAutoManagedConversationTitle(conv) && isPlaceholderConversationTitle(conv.title)) {
@@ -36195,8 +37206,8 @@ function sendMessage() {
             function onToken(token, fullContent, fullCot) {
                 updateStreamingBubble(fullContent, conv, getCurrentGeneratingSpeakerName(conv), fullCot);
             },
-            function onComplete(fullContent, fullCot, usageMeta) {
-                handlePrimaryAssistantComplete(fullContent, fullCot, usageMeta, conv);
+            function onComplete(fullContent, fullCot, usageMeta, reasoningMeta) {
+                handlePrimaryAssistantComplete(fullContent, fullCot, usageMeta, conv, reasoningMeta);
             },
             function onError(err) {
                 state.isGenerating = false;
@@ -36411,6 +37422,12 @@ function bindEvents() {
             }
         } else if (action === 'favorite') {
             toggleMessageFavorite(idx);
+        } else if (action === 'attach-image') {
+            if (!state.isGenerating) insertChatImageAtMessage(idx);
+        } else if (action === 'pin-memory') {
+            if (!state.isGenerating) promptPinnedMemory(idx);
+        } else if (action === 'story-branch') {
+            if (!state.isGenerating) createStoryBranch(idx);
         } else if (action === 'speak') {
             speakMessageText(idx, btn);
         } else if (action === 'delete') {
@@ -36765,8 +37782,20 @@ function bindEvents() {
         if (dom.twoStagePostHistoryInstructions) dom.twoStagePostHistoryInstructions.value = state.settings.twoStagePostHistoryInstructions || '';
         if (dom.requestCotEnabled) dom.requestCotEnabled.checked = state.settings.requestCotEnabled !== false;
         if (dom.showCotEnabled) dom.showCotEnabled.checked = state.settings.showCotEnabled !== false;
+        state.settings.completionSource = normalizeCompletionSource(state.settings.completionSource);
+        if (dom.completionSource) dom.completionSource.value = state.settings.completionSource;
+        if (dom.includeReasoningInHistory) dom.includeReasoningInHistory.checked = state.settings.includeReasoningInHistory === true;
+        updateCompletionSourceHint();
         if (typeof ensureReasoningEffortSettings === 'function') ensureReasoningEffortSettings();
         if (typeof ensureThinkingSettings === 'function') ensureThinkingSettings();
+        if (dom.completionSource && !dom.completionSource.dataset.reasoningBound) {
+            dom.completionSource.dataset.reasoningBound = 'true';
+            dom.completionSource.addEventListener('change', updateCompletionSourceHint);
+        }
+        if (dom.apiEndpoint && !dom.apiEndpoint.dataset.reasoningSourceBound) {
+            dom.apiEndpoint.dataset.reasoningSourceBound = 'true';
+            dom.apiEndpoint.addEventListener('input', updateCompletionSourceHint);
+        }
         if (dom.reasoningEffortEnabled) dom.reasoningEffortEnabled.checked = !!state.settings.reasoningEffortEnabled;
         if (dom.reasoningEffort) dom.reasoningEffort.value = normalizeReasoningEffortLevel(state.settings.reasoningEffort);
         if (dom.thinkingEnabled) dom.thinkingEnabled.checked = !!state.settings.thinkingEnabled;
@@ -37180,6 +38209,8 @@ function bindEvents() {
         if (dom.twoStagePostHistoryInstructions) state.settings.twoStagePostHistoryInstructions = dom.twoStagePostHistoryInstructions.value.trim();
         if (dom.requestCotEnabled) state.settings.requestCotEnabled = !!dom.requestCotEnabled.checked;
         if (dom.showCotEnabled) state.settings.showCotEnabled = !!dom.showCotEnabled.checked;
+        if (dom.completionSource) state.settings.completionSource = normalizeCompletionSource(dom.completionSource.value);
+        if (dom.includeReasoningInHistory) state.settings.includeReasoningInHistory = !!dom.includeReasoningInHistory.checked;
         if (dom.reasoningEffortEnabled) state.settings.reasoningEffortEnabled = !!dom.reasoningEffortEnabled.checked;
         if (dom.reasoningEffort) state.settings.reasoningEffort = normalizeReasoningEffortLevel(dom.reasoningEffort.value);
         if (dom.thinkingEnabled) state.settings.thinkingEnabled = !!dom.thinkingEnabled.checked;
@@ -37624,6 +38655,9 @@ function bindEvents() {
                 messages = buildMessagesForAPI();
             }
             var text = formatPromptMessages(messages);
+            if (currentPromptViewerStage !== 'second') {
+                text = formatPromptDiagnostics(getActiveConv(), messages) + text;
+            }
             dom.promptViewerContent.textContent = text || t('no_messages_to_send');
         } catch (err) {
             console.error('showFullPrompt error:', err);
@@ -38075,3 +39109,7 @@ init().then(function() {
 
 <script src="./ot-boot.js"></script>
 <script src="./ot-status.js"></script>
+
+<script src="./ot-rp.js"></script>
+
+<script src="./ot-quick.js"></script>
