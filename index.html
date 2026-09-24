@@ -14357,6 +14357,8 @@ function getActiveConv() {
 var OT_STATUS_MAX_TABLES = 50;
 var OT_STATUS_MAX_TABLE_CHARS = 12000;
 var OT_STATUS_MAX_INJECT_CHARS = 16000;
+var OT_STATUS_MAX_HISTORY = 80;        // Bounded per-conversation revision storage.
+var OT_STATUS_MAX_HISTORY_PER_TABLE = 8;
 
 function ensureStatusCenter(conv) {
     if (!conv) return { version: 2, tables: [] };
@@ -14365,6 +14367,10 @@ function ensureStatusCenter(conv) {
     }
     conv.statusCenter.version = 2;
     if (!Array.isArray(conv.statusCenter.tables)) conv.statusCenter.tables = [];
+    if (!Array.isArray(conv.statusCenter.history)) conv.statusCenter.history = [];
+    if (conv.statusCenter.history.length > OT_STATUS_MAX_HISTORY) {
+        conv.statusCenter.history = conv.statusCenter.history.slice(-OT_STATUS_MAX_HISTORY);
+    }
 
     // One-time migration from the experimental external script.
     if (Array.isArray(conv.otStatusTables) && conv.otStatusTables.length) {
@@ -14483,6 +14489,79 @@ function notifyStatusCenterUpdated(conv) {
     } catch (_) {}
 }
 
+// Store the previous table value, not the incoming one. Every rollback also
+// records the current value so a mistaken restore can be undone.
+function rememberStatusCenterRevision(center, table, source) {
+    if (!center || !table || !String(table.content || '').trim()) return;
+    if (!Array.isArray(center.history)) center.history = [];
+    center.history.push({
+        name: String(table.name || ''),
+        content: String(table.content || '').slice(0, OT_STATUS_MAX_TABLE_CHARS),
+        revision: Number(table.revision) || 0,
+        updated: Number(table.updated) || 0,
+        capturedAt: Date.now(),
+        source: source === 'manual-rollback' ? source : 'model-update'
+    });
+    var countByName = Object.create(null);
+    var kept = [];
+    for (var i = center.history.length - 1; i >= 0 && kept.length < OT_STATUS_MAX_HISTORY; i--) {
+        var item = center.history[i];
+        if (!item || !item.name) continue;
+        var name = String(item.name);
+        countByName[name] = (countByName[name] || 0) + 1;
+        if (countByName[name] <= OT_STATUS_MAX_HISTORY_PER_TABLE) kept.push(item);
+    }
+    center.history = kept.reverse();
+}
+
+function getStatusCenterHistory(conv, tableName) {
+    if (!conv || !String(tableName || '').trim()) return [];
+    var center = ensureStatusCenter(conv);
+    return center.history.filter(function(h) { return h && h.name === tableName; })
+        .slice(-OT_STATUS_MAX_HISTORY_PER_TABLE).reverse().map(function(h) {
+            return {
+                name: h.name,
+                content: String(h.content || '').slice(0, OT_STATUS_MAX_TABLE_CHARS),
+                revision: Number(h.revision) || 0,
+                updated: Number(h.updated) || 0,
+                capturedAt: Number(h.capturedAt) || 0,
+                source: String(h.source || 'previous-version')
+            };
+        });
+}
+
+// Only the active conversation can be edited from the UI, never another card.
+async function restoreStatusCenterRevision(conv, tableName, revision) {
+    if (!conv || conv !== getActiveConv()) return { ok: false, error: '当前对话已切换，未修改任何数据。' };
+    if (state.isGenerating) return { ok: false, error: '请先停止生成，再恢复状态。' };
+    var center = ensureStatusCenter(conv);
+    var hit = center.tables.find(function(t) { return t && t.name === tableName; });
+    var previous = center.history.slice().reverse().find(function(h) {
+        return h && h.name === tableName && Number(h.revision) === Number(revision);
+    });
+    if (!hit || !previous) return { ok: false, error: '未找到该表或历史版本。' };
+    var restoredContent = String(previous.content || '').slice(0, OT_STATUS_MAX_TABLE_CHARS);
+    if (!restoredContent || hit.content === restoredContent) {
+        return { ok: false, error: '该历史版本与当前内容相同，或内容为空。' };
+    }
+    rememberStatusCenterRevision(center, hit, 'manual-rollback');
+    hit.content = restoredContent;
+    hit.updated = Date.now();
+    hit.revision = (Number(hit.revision) || 0) + 1;
+    conv.updated = Date.now();
+    notifyStatusCenterUpdated(conv);
+    // Do not report success until the browser storage backend confirms saving.
+    try {
+        var saved = await persistState(true);
+        return saved
+            ? { ok: true, revision: hit.revision }
+            : { ok: false, memoryUpdated: true, error: '已在当前页面恢复，但保存失败！请立即导出对话备份。' };
+    } catch (err) {
+        console.error('[Status Center] Manual restore could not persist', err);
+        return { ok: false, memoryUpdated: true, error: '恢复仅存在于当前页面；保存失败，请立即导出备份。' };
+    }
+}
+
 function applyStatusCenterUpdates(conv, updates) {
     if (!conv || !Array.isArray(updates) || !updates.length) return false;
     var center = ensureStatusCenter(conv);
@@ -14507,6 +14586,7 @@ function applyStatusCenterUpdates(conv, updates) {
         }
 
         if (hit.content !== content) {
+            rememberStatusCenterRevision(center, hit, 'model-update');
             hit.content = content;
             hit.updated = Date.now();
             hit.revision = (Number(hit.revision) || 0) + 1;
@@ -14598,6 +14678,12 @@ window.OpenTavernStatusCenterRuntime = {
             conversationId: conv.id || null,
             tables: getStatusCenterTables(conv)
         };
+    },
+    listTableHistory: function(tableName) {
+        return getStatusCenterHistory(getActiveConv(), String(tableName || ''));
+    },
+    restoreRevision: function(tableName, revision) {
+        return restoreStatusCenterRevision(getActiveConv(), String(tableName || ''), revision);
     }
 };
 
