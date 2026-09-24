@@ -11,7 +11,7 @@
 | P0 | 修正存储初始化安全性 | ✅ Implemented (browser QA pending) | 不强行将 pending/uncertain 标记为 ok；持久化申请失败不虚报成功 |
 | P0 | 状态中心历史版本、回滚及移动端 UI | ✅ Implemented (browser QA pending) | 每次变更记录旧版本；手动确认后恢复；重启及导出仍保留 |
 | P0 | 分支设计：聊天 + 状态 + 摘要 + 作者注释快照 | 🧪 Implemented (browser QA pending) | 切换分支时所有相关状态同步，不混写世界书；保持旧导入兼容 |
-| P0 | 分支数据隔离与撤销/重做 | 🚧 Branch isolation implemented, undo/redo pending | 分支创建不修改原会话；失败不会丢失原消息 |
+| P0 | 分支数据隔离与撤销/重做 | 🧪 非破坏式父/子剧情线 back/forward 已实现；浏览器 QA 待做 | 导航不删除任一剧情线；导航记录保存失败时拒绝切换 |
 | P1 | 长期记忆与原消息关联 | 🧪 手动固定 + 可选自动长期记忆已实现；浏览器 QA 待做 | 自动记忆每轮最多2条、来源校验、编辑/删除/剧情回滚后自动失效 |
 | P1 | Swipes 候选回复与状态同步 | 🧪 新回复状态快照/安全切换已实现；浏览器测试待做 | 老回复缺快照提示，已有后续剧情需先创建分支 |
 | P1 | Prompt 组成与状态注入调试 | 🧪 已实现来源、角色 token 估算、激活世界书、状态预算诊断 | token 为本地估算；最终精确计费仍以 API usage 为准 |
@@ -50,7 +50,7 @@
 - [x] Chat-image embeds for both message roles (upload or HTTPS link), click-to-preview, and current-chat image gallery reuse; failed saves roll back safely; browser QA pending.
 - [x] Split character and user status cards; per-character switcher for group conversations; browser QA pending.
 - [x] New timeline snapshots and branch creation from snapshotted turns; browser QA pending.
-- [ ] Historical shared-world-book restore, full branch undo/redo and swipe-specific state restore.
+- [x] Non-destructive branch back/forward navigation; parent and child timelines are both preserved.\n- [ ] Historical shared-world-book restore and deeper legacy swipe-specific state restore.
 - [x] Opt-in source-linked automatic long-term memory (max 2 candidates/turn, stale-source invalidation); browser QA pending.\n- [x] Prompt diagnostics: completion source, role token estimates, activated WorldBook entries and Status Center budget; provider billing tokens still rely on API usage.\n- [ ] Optional immersion UI and extension architecture.
 
 All feature work remains isolated on the development branch until browser and export/import verification.
@@ -78,3 +78,5 @@ All feature work remains isolated on the development branch until browser and ex
 - 自动长期记忆为每对话独立开关；沿用隐藏状态传输块，每轮最多2条，绑定来源消息并在来源失效时停止注入。
 - 图片引用支持输入 `#` 打开本对话图库并复用已有图片；不会自动把 display-only 图片作为视觉输入再次发给模型。
 - 本批自动化回归已通过；仍需桌面/移动端真实浏览器、OPFS、导出导入与实际 Provider API 联调后再考虑合并 main。
+
+- 剧情分支新增非破坏式 `↶/↷` 导航；返回父线时记录最近子线，重做直接回到该子线，不通过删除实现撤销。\n
