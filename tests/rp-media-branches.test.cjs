@@ -86,3 +86,46 @@ test('oversized snapshots refuse to fabricate old states',()=>{
  assert.equal(f.captureStorySnapshot(f.A,f.A.messages[0]),false);
  assert.equal(f.A.storySnapshots&&f.A.storySnapshots.m1,undefined);
 });
+
+function branchNavFixture(save=true){
+ const A={id:'A',title:'Root',messages:[]};
+ const B={id:'B',title:'Fork B',messages:[],branchMeta:{parentId:'A',parentMessageId:'m1',createdAt:2}};
+ const C={id:'C',title:'Fork C',messages:[],branchMeta:{parentId:'A',parentMessageId:'m1',createdAt:3}};
+ const state={activeConvId:'B',conversations:{A,B,C},conversationOrder:['C','B','A'],isGenerating:false};
+ let loaded='',saves=0;
+ const src=block('function listStoryBranchChildren(parentId){','window.WuuChatImageRuntime = {');
+ const runtime=new Function('state','window','getActiveConv','persistState','loadConversation',
+   src+'\nreturn window.WuuBranchRuntime;')(
+   state,{},()=>state.conversations[state.activeConvId],async()=>{saves++;return save;},
+   async id=>{loaded=id;state.activeConvId=id;});
+ return {runtime,state,A,B,C,get loaded(){return loaded;},get saves(){return saves;}};
+}
+test('branch undo-redo navigation never deletes either timeline',async()=>{
+ const f=branchNavFixture();
+ const childInfo=f.runtime.info();
+ assert.equal(childInfo.parent.id,'A');
+ assert.equal((await f.runtime.back()).ok,true);
+ assert.equal(f.loaded,'A');
+ assert.equal(f.A.branchNavigation.lastChildId,'B');
+ assert.deepEqual(Object.keys(f.state.conversations).sort(),['A','B','C']);
+ const rootInfo=f.runtime.info();
+ assert.equal(rootInfo.forward.id,'B','recently visited child wins over newer sibling');
+ assert.equal((await f.runtime.forward()).ok,true);
+ assert.equal(f.loaded,'B');
+ assert.deepEqual(Object.keys(f.state.conversations).sort(),['A','B','C']);
+});
+test('branch navigation refuses to switch when its navigation record cannot persist',async()=>{
+ const f=branchNavFixture(false);
+ const result=await f.runtime.back();
+ assert.equal(result.ok,false);
+ assert.equal(f.state.activeConvId,'B');
+ assert.equal(f.loaded,'');
+ assert.deepEqual(Object.keys(f.state.conversations).sort(),['A','B','C']);
+});
+test('branch navigation helper is included in future Pages assembly',()=>{
+ const pages=fs.readFileSync(path.join(__dirname,'..','.github','workflows','pages.yml'),'utf8');
+ assert.match(pages,/ot-branch\.js/);
+ const helper=fs.readFileSync(path.join(__dirname,'..','ot-branch.js'),'utf8');
+ assert.doesNotThrow(()=>new Function(helper));
+ assert.match(helper,/WuuBranchRuntime/);
+});
