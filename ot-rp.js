@@ -13,6 +13,15 @@
         '#wuuRpDock { flex:0 0 auto; padding:8px 14px; border-bottom:1px solid rgba(127,127,127,.15);',
         'background:var(--bg-primary,rgba(18,18,22,.92)); color:var(--text-primary,inherit); }',
         '#wuuRpDock[hidden],#wuuRpCards[hidden],#wuuImageLightbox[hidden] { display:none!important; }',
+        '#wuuImageGallery[hidden]{display:none!important}',
+        '#wuuImageGallery{position:fixed;inset:0;z-index:2147483090;display:flex;align-items:center;justify-content:center;',
+        'background:rgba(0,0,0,.82);padding:12px;box-sizing:border-box}',
+        '#wuuImageGalleryBody{max-width:min(750px,98vw);width:100%;max-height:87dvh;overflow:auto;',
+        'padding:16px;border-radius:16px;background:var(--bg-primary,#232323);color:var(--text-primary,white)}',
+        '#wuuImageGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(105px,1fr));gap:10px;margin-top:10px}',
+        '#wuuImageGrid button{border:1px solid rgba(127,127,127,.3);background:transparent;color:inherit;',
+        'border-radius:10px;cursor:pointer;padding:5px;min-width:0;overflow:hidden}',
+        '#wuuImageGrid img{display:block;max-width:100%;aspect-ratio:1;object-fit:contain}',
         '#wuuRpHead { display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:7px;font-size:12px; }',
         '#wuuRpToggle { flex:none;cursor:pointer;border:1px solid rgba(127,127,127,.25);border-radius:8px;',
         'background:transparent;color:inherit;padding:4px 10px; }',
@@ -178,6 +187,62 @@
             /^data:image\/(?:png|jpe?g|webp|gif);base64,[a-z0-9+\/=]+$/i.test(src);
     }
 
+    var gallery = null;
+    function ensureGallery() {
+        if (gallery) return gallery;
+        gallery = element('div'); gallery.id='wuuImageGallery';gallery.hidden=true;
+        gallery.setAttribute('role','dialog'); gallery.setAttribute('aria-modal','true');
+        gallery.setAttribute('aria-label','本对话图片库');
+        var body=element('div');body.id='wuuImageGalleryBody';
+        var head=element('div');
+        head.style.cssText='display:flex;justify-content:space-between;align-items:center;gap:9px';
+        head.appendChild(element('strong','','本对话已有图片'));
+        var close=element('button','','关闭 ×');close.type='button';
+        close.style.cssText='cursor:pointer;color:inherit;border:1px solid rgba(127,127,127,.3);border-radius:8px;background:transparent;padding:6px 12px';
+        close.onclick=function(){gallery.hidden=true;};head.appendChild(close);
+        body.appendChild(head);
+        var tip=element('p','','点击图片即可复用到选中的消息，不会重新上传，也不会自动发送给模型。');
+        tip.style.cssText='font-size:12px;opacity:.7;line-height:1.6;margin-top:7px';
+        body.appendChild(tip);
+        var grid=element('div');grid.id='wuuImageGrid';body.appendChild(grid);
+        gallery.appendChild(body);
+        gallery.addEventListener('click',function(e){if(e.target===gallery)gallery.hidden=true;});
+        document.body.appendChild(gallery);
+        return gallery;
+    }
+    window.addEventListener('wuu-chat-image-gallery',function(e){
+        var rt=window.WuuChatImageRuntime,detail=e&&e.detail||{};
+        if(!rt||!rt.list||!rt.attach||rt.conversationId()!==detail.conversationId)return;
+        var modal=ensureGallery(),grid=document.getElementById('wuuImageGrid');
+        grid.replaceChildren();
+        var images=rt.list();
+        if(!images.length) {
+            var empty=element('p','','这场对话还没有可以复用的图片。');
+            empty.style.cssText='font-size:13px;opacity:.7;padding:16px';grid.appendChild(empty);
+        }
+        images.forEach(function(item) {
+            if(!isSafeImageSource(item.src))return;
+            var button=element('button');button.type='button';
+            var image=document.createElement('img');
+            image.src=item.src;image.loading='lazy';image.referrerPolicy='no-referrer';
+            image.alt=item.name||'已有图片';
+            button.appendChild(image);
+            var label=element('div','',item.name||'图片');
+            label.style.cssText='font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:4px';
+            button.appendChild(label);
+            button.onclick=async function() {
+                button.disabled=true;
+                try {
+                    var out=await rt.attach(detail.conversationId,detail.targetIndex,item.messageId,item.index);
+                    if(out&&out.ok)modal.hidden=true;
+                    else window.alert(out&&out.error||'图片引用失败。');
+                } finally {button.disabled=false;}
+            };
+            grid.appendChild(button);
+        });
+        modal.hidden=false;
+    });
+
     document.addEventListener('click',function(e) {
         var img = e.target && e.target.closest &&
             e.target.closest('.msg-bubble img, .msg-attachments img');
@@ -193,6 +258,7 @@
         if (e.key !== 'Escape') return;
         var box = document.getElementById('wuuImageLightbox');
         if (box && !box.hidden) box.hidden = true;
+        if (gallery && !gallery.hidden) gallery.hidden = true;
     });
     window.addEventListener('ot-status-center-updated',refresh);
     window.addEventListener('ot-chat-context-changed',refresh);
