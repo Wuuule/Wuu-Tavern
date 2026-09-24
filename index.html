@@ -15091,6 +15091,45 @@ window.WuuQuickReplyRuntime = {
     }
 };
 
+window.WuuChatImageRuntime = {
+    conversationId: function() { var c=getActiveConv();return c?c.id:null; },
+    list: function() {
+        var c=getActiveConv(),list=[];
+        if(!c||!Array.isArray(c.messages))return list;
+        c.messages.forEach(function(m){
+            if(!m||!m.id||!Array.isArray(m.attachments))return;
+            m.attachments.forEach(function(att,i){
+                if(!att||att.type!=='image')return;
+                var src=String(att.dataUrl||att.url||'');
+                if(!isSafeChatImageSource(src))return;
+                list.push({messageId:m.id,index:i,src:src,
+                    name:String(att.name||att.source||'图片').slice(0,90)});
+            });
+        });
+        return list.slice(-60).reverse();
+    },
+    attach: async function(chatId,targetIndex,msgId,imageIndex){
+        var c=getActiveConv();
+        if(!c||c.id!==chatId||state.isGenerating)return {ok:false,error:'当前对话已切换或正在生成。'};
+        var target=c.messages&&c.messages[targetIndex];
+        var source=c.messages.find(function(m){return m&&m.id===msgId;});
+        var att=source&&source.attachments&&source.attachments[imageIndex];
+        if(!target||!att||att.type!=='image'||!isSafeChatImageSource(att.dataUrl||att.url))
+            return {ok:false,error:'图片不存在或格式不受支持。'};
+        if(!Array.isArray(target.attachments))target.attachments=[];
+        if(target.attachments.length>=12)return {ok:false,error:'单条消息最多12张图片。'};
+        var copy=cloneJsonData(att);
+        copy.source='chat_embed';
+        copy.createdAt=Date.now();
+        target.attachments.push(copy);
+        c.updated=Date.now();
+        var ok=await persistState(true);
+        if(!ok){target.attachments.pop();return {ok:false,error:'保存失败，引用已撤销。'};}
+        requestRender('activeConvId');
+        return {ok:true};
+    }
+};
+
 // ==================== Translation DOM Updates ====================
 function applyTranslations() {
     // data-i18n — text content
@@ -35295,13 +35334,19 @@ async function insertChatImageAtMessage(idx) {
     var conv = getActiveConv(), msg = conv && conv.messages[idx];
     if (!msg) return;
     var url = await showGlassPrompt(
-        '输入 https 图片直链；留空则选择本地图片。图片只显示在此消息内，不会自动发送给模型。',
-        { title:'插入聊天图片', input:{value:'',placeholder:'https://...（留空选本地文件）',maxLength:2000} }
+        '输入 https 图片直链；输入 # 浏览本对话已有图片；留空选择本地图片。图片只显示在此消息内，不会自动发送给模型。',
+        { title:'插入聊天图片', input:{value:'',placeholder:'https://... / #图库 / 留空本地文件',maxLength:2000} }
     );
     if (url == null || getActiveConv() !== conv || state.isGenerating || !conv.messages.includes(msg)) return;
     url = String(url).trim();
     var attachment = null;
     if (url) {
+        if (url === '#' || url.toLowerCase() === 'gallery') {
+            window.dispatchEvent(new CustomEvent('wuu-chat-image-gallery',{
+                detail:{conversationId:conv.id,targetIndex:idx}
+            }));
+            return;
+        }
         if (!/^https:\/\//i.test(url)) {
             await showGlassConfirm('图片地址必须以 https:// 开头。', {title:'图片地址无效',showCancel:false});
             return;
@@ -35340,8 +35385,12 @@ async function insertChatImageAtMessage(idx) {
     msg.attachments.push(attachment);
     conv.updated=Date.now();
     var saved=await persistState(true);
+    if (saved === false) {
+        msg.attachments.pop();
+        await showGlassConfirm('图片保存失败，已撤销本次插入；原消息未被修改。',{showCancel:false,title:'保存失败'});
+        return;
+    }
     requestRender('activeConvId');
-    if (saved === false) await showGlassConfirm('图片已在内存中显示，但保存失败，请立即导出备份。',{showCancel:false,title:'保存失败'});
 }
 
 function renderMessageAttachments(msg) {
