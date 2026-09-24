@@ -12,7 +12,7 @@
     var styleText = [
         '#wuuRpDock { flex:0 0 auto; padding:8px 14px; border-bottom:1px solid rgba(127,127,127,.15);',
         'background:var(--bg-primary,rgba(18,18,22,.92)); color:var(--text-primary,inherit); }',
-        '#wuuRpDock[hidden],#wuuImageLightbox[hidden] { display:none!important; }',
+        '#wuuRpDock[hidden],#wuuRpCards[hidden],#wuuImageLightbox[hidden] { display:none!important; }',
         '#wuuRpHead { display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:7px;font-size:12px; }',
         '#wuuRpToggle { flex:none;cursor:pointer;border:1px solid rgba(127,127,127,.25);border-radius:8px;',
         'background:transparent;color:inherit;padding:4px 10px; }',
