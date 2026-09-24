@@ -10,8 +10,8 @@
 | P0 | 备份升级前完整仓库并隔离开发分支 | ✅ Done | 两条分支均从同一基准 SHA 创建；main 不变 |
 | P0 | 修正存储初始化安全性 | ✅ Implemented (browser QA pending) | 不强行将 pending/uncertain 标记为 ok；持久化申请失败不虚报成功 |
 | P0 | 状态中心历史版本、回滚及移动端 UI | ✅ Implemented (browser QA pending) | 每次变更记录旧版本；手动确认后恢复；重启及导出仍保留 |
-| P0 | 分支设计：聊天 + 状态 + 摘要 + 作者注释快照 | ⬜ Planned | 切换分支时所有相关状态同步，不混写世界书；保持旧导入兼容 |
-| P0 | 分支数据隔离与撤销/重做 | ⬜ Planned | 分支创建不修改原会话；失败不会丢失原消息 |
+| P0 | 分支设计：聊天 + 状态 + 摘要 + 作者注释快照 | 🧪 Implemented (browser QA pending) | 切换分支时所有相关状态同步，不混写世界书；保持旧导入兼容 |
+| P0 | 分支数据隔离与撤销/重做 | 🚧 Branch isolation implemented, undo/redo pending | 分支创建不修改原会话；失败不会丢失原消息 |
 | P1 | 长期事件记忆与原消息关联 | ⬜ Planned | 消息编辑/删除/重新生成后可追踪并失效错误记忆 |
 | P1 | Swipes 候选回复与状态同步 | ⬜ Planned | 未选中的候选不污染当前剧情状态 |
 | P1 | Prompt token 构成、世界书及状态注入调试 | ⬜ Planned | 显示实际激活项、截断提示，不重复计数 |
