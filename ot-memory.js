@@ -118,6 +118,7 @@ function render(){
 function init(){if(ensure())switchTab();}
 document.addEventListener('DOMContentLoaded',init);
 window.addEventListener('load',init);
+window.addEventListener('ot-status-modal-created',init);
 window.addEventListener('ot-pinned-memory-updated',render);
 window.addEventListener('ot-chat-context-changed',render);
 if(document.readyState!=='loading')init();
