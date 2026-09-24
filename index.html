@@ -14748,10 +14748,12 @@ async function deletePinnedMemory(id){
     return false;
 }
 function invalidatePinnedMemoriesAfter(conv,index){
-    if(!conv||!Array.isArray(conv.pinnedMemories))return;
+    if(!conv)return;
     var affected=new Set((conv.messages||[]).slice(Math.max(0,index))
         .map(function(m){return m&&m.id;}).filter(Boolean));
-    conv.pinnedMemories.forEach(function(m){if(m&&affected.has(m.messageId))m.stale=true;});
+    if(Array.isArray(conv.pinnedMemories)){
+        conv.pinnedMemories.forEach(function(m){if(m&&affected.has(m.messageId))m.stale=true;});
+    }
     if(Array.isArray(conv.autoMemories)){
         conv.autoMemories.forEach(function(m){if(m&&affected.has(m.messageId))m.stale=true;});
     }
