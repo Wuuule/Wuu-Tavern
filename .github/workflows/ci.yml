@@ -24,6 +24,7 @@ jobs:
           node --check ot-boot.js
           node --check ot-status.js
           node --check ot-rp.js
+          node --check ot-quick.js
           node --check wuu-ledger.js
       - name: Status Center regression tests
         run: node --test tests/*.test.cjs
