@@ -15091,6 +15091,53 @@ window.WuuQuickReplyRuntime = {
     }
 };
 
+function listStoryBranchChildren(parentId){
+    if(!parentId)return [];
+    return (state.conversationOrder||[]).map(function(id){return state.conversations[id];})
+        .filter(function(c){return c&&c.branchMeta&&c.branchMeta.parentId===parentId;})
+        .sort(function(a,b){return (Number(b.updated)||0)-(Number(a.updated)||0);});
+}
+function getStoryBranchNavigationInfo(){
+    var c=getActiveConv();
+    if(!c)return {conversationId:null,parent:null,children:[],forward:null};
+    var parent=c.branchMeta&&c.branchMeta.parentId?state.conversations[c.branchMeta.parentId]:null;
+    var children=listStoryBranchChildren(c.id);
+    var remembered=c.branchNavigation&&c.branchNavigation.lastChildId
+        ? state.conversations[c.branchNavigation.lastChildId]:null;
+    if(remembered&&(!remembered.branchMeta||remembered.branchMeta.parentId!==c.id))remembered=null;
+    var forward=remembered||children[0]||null;
+    return {
+        conversationId:c.id,
+        parent:parent?{id:parent.id,title:parent.title||'父分支'}:null,
+        children:children.map(function(x){return {id:x.id,title:x.title||'剧情分支'};}),
+        forward:forward?{id:forward.id,title:forward.title||'剧情分支'}:null
+    };
+}
+async function navigateStoryBranch(direction){
+    if(state.isGenerating)return {ok:false,error:'生成期间不能切换剧情分支。'};
+    var current=getActiveConv(),info=getStoryBranchNavigationInfo(),target=null;
+    if(!current)return {ok:false,error:'当前没有对话。'};
+    if(direction==='back'){
+        target=info.parent&&state.conversations[info.parent.id];
+        if(!target)return {ok:false,error:'当前已经是这条剧情线的根节点。'};
+        if(!target.branchNavigation||typeof target.branchNavigation!=='object')target.branchNavigation={};
+        target.branchNavigation.lastChildId=current.id;
+        target.branchNavigation.updatedAt=Date.now();
+    }else if(direction==='forward'){
+        target=info.forward&&state.conversations[info.forward.id];
+        if(!target)return {ok:false,error:'没有可返回的子剧情分支。'};
+    }else return {ok:false,error:'未知的分支导航方向。'};
+    var saved=await persistState(true);
+    if(saved===false)return {ok:false,error:'分支导航记录保存失败，未切换。'};
+    await loadConversation(target.id);
+    return {ok:true,conversationId:target.id};
+}
+window.WuuBranchRuntime={
+    info:getStoryBranchNavigationInfo,
+    back:function(){return navigateStoryBranch('back');},
+    forward:function(){return navigateStoryBranch('forward');}
+};
+
 window.WuuChatImageRuntime = {
     conversationId: function() { var c=getActiveConv();return c?c.id:null; },
     list: function() {
