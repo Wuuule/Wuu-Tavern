@@ -1,7 +1,7 @@
 name: Safe upgrade checks
-
+# A feature push already tests same-repository PRs. Avoid duplicate
+# pull_request jobs and duplicate failure notification emails.
 on:
-  pull_request:
   push:
     branches:
       - 'feature/**'
@@ -10,15 +10,19 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: safe-upgrade-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: '20'
+          node-version: '24'
       - name: JavaScript syntax
         run: |
           node --check ot-boot.js
@@ -27,5 +31,5 @@ jobs:
           node --check ot-quick.js
           node --check ot-memory.js
           node --check wuu-ledger.js
-      - name: Status Center regression tests
+      - name: Regression tests
         run: node --test tests/*.test.cjs
