@@ -23,6 +23,7 @@ jobs:
         run: |
           node --check ot-boot.js
           node --check ot-status.js
+          node --check ot-rp.js
           node --check wuu-ledger.js
       - name: Status Center regression tests
-        run: node --test tests/status-center.test.cjs
+        run: node --test tests/*.test.cjs
