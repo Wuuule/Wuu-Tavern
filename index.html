@@ -14643,6 +14643,94 @@ function getStatusCenterTables(conv) {
 
 // Diagnostics are session-only and never serialized into a character card.
 var statusPromptDiagnostics = Object.create(null);
+
+var PIN_MEMORY_LIMIT=40, PIN_MEMORY_PROMPT_CHARS=4500;
+function fingerprintMessage(text) {
+    var raw=String(text||''),h=2166136261;
+    for(var k=0;k<raw.length;k++){h^=raw.charCodeAt(k);h=Math.imul(h,16777619);}
+    return raw.length+':'+(h>>>0).toString(16);
+}
+function readPinnedMemories(conv) {
+    if(!conv)return [];
+    var lookup=Object.create(null);
+    (conv.messages||[]).forEach(function(m){if(m&&m.id)lookup[m.id]=m;});
+    return (Array.isArray(conv.pinnedMemories)?conv.pinnedMemories:[]).slice(-PIN_MEMORY_LIMIT)
+        .filter(function(m){return !!(m&&m.id&&m.messageId&&m.text);})
+        .map(function(m){
+            var source=lookup[m.messageId];
+            return {id:m.id,messageId:m.messageId,text:String(m.text).slice(0,600),
+                createdAt:m.createdAt||0,sourceRole:m.sourceRole||'',
+                stale:!!m.stale||!source||fingerprintMessage(source.content)!==m.fingerprint};
+        });
+}
+async function addPinnedMemory(messageId,text) {
+    var conv=getActiveConv();
+    if(!conv||state.isGenerating)return {ok:false,error:'生成期间不能修改记忆'};
+    var source=(conv.messages||[]).find(function(m){return m&&m.id===messageId;});
+    if(!source)return {ok:false,error:'原消息已不存在'};
+    var trimmed=String(text||'').trim().slice(0,600);
+    if(!trimmed)return {ok:false,error:'记忆不能为空'};
+    if(!Array.isArray(conv.pinnedMemories))conv.pinnedMemories=[];
+    if(conv.pinnedMemories.length>=PIN_MEMORY_LIMIT)return {ok:false,error:'记忆已达40条上限'};
+    var record={id:makeId(),messageId:messageId,text:trimmed,createdAt:Date.now(),
+        sourceRole:source.role||'',fingerprint:fingerprintMessage(source.content),stale:false};
+    conv.pinnedMemories.push(record);
+    try{
+        if(await persistState(true)===true){
+            window.dispatchEvent(new CustomEvent('ot-pinned-memory-updated'));
+            return {ok:true,id:record.id};
+        }
+    }catch(err){console.error('[Pinned memory] Save failed',err);}
+    conv.pinnedMemories=conv.pinnedMemories.filter(function(x){return x!==record;});
+    return {ok:false,error:'保存失败，未添加记忆'};
+}
+async function deletePinnedMemory(id){
+    var conv=getActiveConv();
+    if(!conv||state.isGenerating||!Array.isArray(conv.pinnedMemories))return false;
+    var before=conv.pinnedMemories.slice();
+    conv.pinnedMemories=before.filter(function(x){return x&&x.id!==id;});
+    if(before.length===conv.pinnedMemories.length)return false;
+    try{
+        if(await persistState(true)===true){
+            window.dispatchEvent(new CustomEvent('ot-pinned-memory-updated'));
+            return true;
+        }
+    }catch(err){console.error('[Pinned memory] Remove failed',err);}
+    conv.pinnedMemories=before;
+    return false;
+}
+function invalidatePinnedMemoriesAfter(conv,index){
+    if(!conv||!Array.isArray(conv.pinnedMemories))return;
+    var affected=new Set((conv.messages||[]).slice(Math.max(0,index))
+        .map(function(m){return m&&m.id;}).filter(Boolean));
+    conv.pinnedMemories.forEach(function(m){if(m&&affected.has(m.messageId))m.stale=true;});
+}
+function buildPinnedMemoryPrompt(conv){
+    var current=readPinnedMemories(conv).filter(function(m){return !m.stale;});
+    if(!current.length)return '';
+    var output='【用户手动固定的记忆】\n这些条目有对应聊天来源。如果与较新的用户说明冲突，以最新用户说明为准。不得在可见正文打印此列表。\n';
+    current.forEach(function(m){
+        var line='- '+String(m.text).replace(/[\r\n]+/g,' ').slice(0,600)+'\n';
+        if(output.length+line.length<=PIN_MEMORY_PROMPT_CHARS)output+=line;
+    });
+    return output;
+}
+function renderPinMemoryAction(idx){
+    return '<button class="msg-action-btn" data-action="pin-memory" data-msg-idx="'+idx+
+        '" title="固定重要记忆" aria-label="固定重要记忆">✦</button>';
+}
+async function promptPinnedMemory(idx){
+    var conv=getActiveConv(),msg=conv&&conv.messages[idx];
+    if(!msg||state.isGenerating)return;
+    var content=String(msg.content||'').trim().slice(0,500);
+    if(!content)return;
+    var value=await showGlassPrompt('编辑要保存的事实。用户固定的记忆将用于后续相关剧情。',{
+        title:'固定重要记忆',input:{value:content,maxLength:600}});
+    if(value===null||conv!==getActiveConv()||state.isGenerating)return;
+    var result=await addPinnedMemory(msg.id,value);
+    if(!result.ok)await showGlassConfirm(result.error,{showCancel:false,title:'记忆未保存'});
+}
+
 function buildStatusCenterRuntimeMessage(conv) {
     if (!conv) return '';
     var tables = getStatusCenterTables(conv);
@@ -14796,6 +14884,9 @@ window.OpenTavernStatusCenterRuntime = {
         var conv = getActiveConv();
         return conv && conv.id ? JSON.parse(JSON.stringify(statusPromptDiagnostics[conv.id] || null)) : null;
     },
+    listPinnedMemories: function(){return readPinnedMemories(getActiveConv());},
+    addPinnedMemory: function(id,text){return addPinnedMemory(id,text);},
+    deletePinnedMemory: function(id){return deletePinnedMemory(id);},
     restoreRevision: function(tableName, revision) {
         return restoreStatusCenterRevision(getActiveConv(), String(tableName || ''), revision);
     }
@@ -19062,6 +19153,8 @@ function buildMessagesForAPI(generationType) {
         return message;
     });
 
+    var pinnedMemoryMessage = buildPinnedMemoryPrompt(conv);
+    if(pinnedMemoryMessage)apiMessages.push({role:'system',content:pinnedMemoryMessage});
     var statusCenterRuntimeMessage = buildStatusCenterRuntimeMessage(conv);
     if (statusCenterRuntimeMessage) {
         apiMessages.push({ role: 'system', content: statusCenterRuntimeMessage });
@@ -25075,6 +25168,7 @@ function captureStorySnapshot(conv,msg){
         mvu:cloneJsonData(conv.mvu||null),
         worldInfo:cloneJsonData(conv.worldInfo||null),
         worldBookIds:cloneJsonData(conv.worldBookIds||[]),
+        pinnedMemories:cloneJsonData(conv.pinnedMemories||[]),
         userPersonaId:conv.userPersonaId||''};
     if(JSON.stringify(snap).length>STORY_SNAPSHOT_BYTES)return false;
     if(!conv.storySnapshots||typeof conv.storySnapshots!=='object')conv.storySnapshots={};
@@ -25118,6 +25212,7 @@ async function createStoryBranch(idx){
     copy.mvu=fork.mvu;
     copy.worldInfo=fork.worldInfo;
     copy.worldBookIds=fork.worldBookIds;
+    copy.pinnedMemories=fork.pinnedMemories||[];
     copy.userPersonaId=fork.userPersonaId;
     var eligible=new Set(copy.messages.map(function(m){return m.id;}));
     Object.keys(copy.storySnapshots||{}).forEach(function(k){
