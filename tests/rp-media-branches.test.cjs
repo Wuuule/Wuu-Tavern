@@ -4,7 +4,7 @@ const fs=require('node:fs'), path=require('node:path');
 const html=fs.readFileSync(path.join(__dirname,'..','index.html'),'utf8');
 function block(a,b){const i=html.indexOf(a),j=html.indexOf(b,i);assert.ok(i>=0&&j>i,a);return html.slice(i,j);}
 function statusFixture(group) {
- const A={id:'A',group:group?{members:[{character:{name:'Alice'},order:0},{character:{name:'Bob'},order:1}]}:null,character:group?null:{name:'Alice'}};
+ const A={id:'A',group:group?{members:[{character:{name:'Alice'},order:0},{character:{name:'Bob'},order:1}]}:null,character:group?null:{name:'Alice'},userPersonaId:'persona1'};
  const B={id:'B',character:{name:'Claire'}},state={activeConvId:'A',conversations:{A,B},settings:{userName:'Player'},isGenerating:false};
  const src='function getActiveConv(){return state.conversations[state.activeConvId];}\n'+
    block('var OT_STATUS_MAX_TABLES = 50;','// ==================== Translation DOM Updates')+
