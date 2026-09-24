@@ -15,9 +15,9 @@ function fixture(save=true) {
  const B={id:'B',messages:[{id:'m3',role:'user',attachments:[{type:'image',url:'https://example.com/b.png'}]}]};
  const state={activeConvId:'A',conversations:{A,B},isGenerating:false};
  let changes=0;
- const runtime=new Function('state','getActiveConv','isSafeChatImageSource','cloneJsonData','persistState','requestRender',
+ const runtime=new Function('state','window','getActiveConv','isSafeChatImageSource','cloneJsonData','persistState','requestRender',
    html.slice(start,end)+'\nreturn window.WuuChatImageRuntime;')(
-   state,()=>state.conversations[state.activeConvId],
+   state,{},()=>state.conversations[state.activeConvId],
    uri=>/^https:\/\//.test(uri)||/^data:image\/(?:png|jpeg|webp|gif);base64,[a-z0-9+/=]+$/i.test(uri),
    x=>JSON.parse(JSON.stringify(x)),async()=>save,()=>changes++);
  return {runtime,state,A,B,get changes(){return changes;}};
