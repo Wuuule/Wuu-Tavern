@@ -13924,6 +13924,7 @@ function appendFinalAssistantMessage(conv, fullContent, fullCot) {
                 </button>
                 ${renderFavoriteStarHtml(lastMsg, actualIdx)}
                 ${renderChatImageAction(actualIdx)}
+                ${renderPinMemoryAction(actualIdx)}
                 ${renderStoryBranchAction(conv,lastMsg,actualIdx)}
                 ${renderSpeakButton(actualIdx)}
                 <button class="msg-action-btn edit-btn" data-action="edit" data-msg-idx="${actualIdx}" title="${t('edit_msg')}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
@@ -30879,6 +30880,7 @@ function renderMessages() {
                         </button>
                         ${renderFavoriteStarHtml(msg, actualIdx)}
                         ${renderChatImageAction(actualIdx)}
+                        ${renderPinMemoryAction(actualIdx)}
                         ${renderStoryBranchAction(conv,msg,actualIdx)}
                         ${renderSpeakButton(actualIdx)}
                         <button class="msg-action-btn edit-btn" data-action="edit" data-msg-idx="${actualIdx}" title="${t('edit_msg')}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
@@ -30936,6 +30938,7 @@ function renderMessages() {
         html += '<button class="msg-action-btn copy-btn" data-action="copy" data-msg-idx="' + actualIdx + '" title="' + t('copy') + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>';
         html += renderFavoriteStarHtml(msg, actualIdx);
         html += renderChatImageAction(actualIdx);
+        html += renderPinMemoryAction(actualIdx);
         html += renderStoryBranchAction(conv,msg,actualIdx);
         html += renderSpeakButton(actualIdx);
         html += '<button class="msg-action-btn edit-btn" data-action="edit" data-msg-idx="' + actualIdx + '" title="' + t('edit_msg') + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>';
@@ -31012,6 +31015,7 @@ function renderMessagesFullHistory(conv) {
         html += '<button class="msg-action-btn copy-btn" data-action="copy" data-msg-idx="' + actualIdx + '" title="' + t('copy') + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>';
         html += renderFavoriteStarHtml(msg, actualIdx);
         html += renderChatImageAction(actualIdx);
+        html += renderPinMemoryAction(actualIdx);
         html += renderStoryBranchAction(conv,msg,actualIdx);
         html += renderSpeakButton(actualIdx);
         html += '<button class="msg-action-btn edit-btn" data-action="edit" data-msg-idx="' + actualIdx + '" title="' + t('edit_msg') + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>';
@@ -35251,6 +35255,7 @@ function deleteMessage(actualIdx) {
     if (!conv) return;
     var msg = conv.messages[actualIdx];
     if (!msg) return;
+    invalidatePinnedMemoriesAfter(conv,actualIdx);
     var deletedMessageId = msg.id || msg.messageId || String(actualIdx);
     if (msg.role === 'user') {
         var deleteCount = 1;
@@ -36115,6 +36120,7 @@ function editMessage(actualIdx, triggerBtn) {
                 }
             }
 
+            invalidatePinnedMemoriesAfter(conv,actualIdx);
             selectOrCreateUserVersion(conv, msg, newVal);
             prepareUserEditRegeneration(conv, msg, actualIdx);
             invalidateConversationAfterUserEdit(conv, actualIdx);
@@ -36123,6 +36129,7 @@ function editMessage(actualIdx, triggerBtn) {
             return;
         }
 
+        invalidatePinnedMemoriesAfter(conv,actualIdx);
         msg.content = newVal;
         msg.editedAt = Date.now();
         if (conv.mvu) rebuildMvuSnapshots(conv);
@@ -36902,6 +36909,8 @@ function bindEvents() {
             toggleMessageFavorite(idx);
         } else if (action === 'attach-image') {
             if (!state.isGenerating) insertChatImageAtMessage(idx);
+        } else if (action === 'pin-memory') {
+            if (!state.isGenerating) promptPinnedMemory(idx);
         } else if (action === 'story-branch') {
             if (!state.isGenerating) createStoryBranch(idx);
         } else if (action === 'speak') {
