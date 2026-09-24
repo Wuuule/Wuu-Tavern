@@ -1,0 +1,28 @@
+name: Safe upgrade checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - 'feature/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: JavaScript syntax
+        run: |
+          node --check ot-boot.js
+          node --check ot-status.js
+          node --check wuu-ledger.js
+      - name: Status Center regression tests
+        run: node --test tests/status-center.test.cjs
