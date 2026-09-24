@@ -69,8 +69,11 @@ test('status prompt prioritizes current scene and produces closed tags',()=>{
  const diag=f.runtime.getPromptDiagnostics();
  assert.match(prompt, /Day 10/);
  assert.ok(prompt.length<=16000);
- assert.equal((prompt.match(/<StatusTable /g)||[]).length,
-    (prompt.match(/<\/StatusTable>/g)||[]).length);
+ // Protocol examples above the status payload need not be XML-balanced.
+ // Only the emitted CURRENT_STATUS_CENTER payload must be well formed.
+ const payload=prompt.split('<CURRENT_STATUS_CENTER>').pop().split('</CURRENT_STATUS_CENTER>')[0];
+ assert.equal((payload.match(/<StatusTable /g)||[]).length,
+    (payload.match(/<\\/StatusTable>/g)||[]).length);
  assert.ok(diag.included.includes('Scene Anchor'));
  assert.ok(diag.omitted.length>0||diag.truncated.length>0);
 });
