@@ -13924,6 +13924,7 @@ function appendFinalAssistantMessage(conv, fullContent, fullCot) {
                 </button>
                 ${renderFavoriteStarHtml(lastMsg, actualIdx)}
                 ${renderChatImageAction(actualIdx)}
+                ${renderStoryBranchAction(conv,lastMsg,actualIdx)}
                 ${renderSpeakButton(actualIdx)}
                 <button class="msg-action-btn edit-btn" data-action="edit" data-msg-idx="${actualIdx}" title="${t('edit_msg')}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
                 ${renderContinueButton(conv, lastMsg, actualIdx)}
@@ -24063,6 +24064,7 @@ function finishAssistantMessage(conv, fullContent, speakerForMsg, stage, parentI
         if (parent) syncActiveResponseVersion(conv, parent);
     }
     conv.updated = Date.now();
+    captureStorySnapshot(conv,pushObj);
     clearStreamingDraft(conv, true, streamGenerationId);
     emitTavernEvent(frontendEventNames.MESSAGE_RECEIVED, { chatId: conv.id, messageId: pushObj.id, message: cloneJsonData(pushObj) });
     appendFinalAssistantMessage(conv, fullContent, fullCot);
@@ -24976,6 +24978,80 @@ function openSummaryManager() {
     dom.summaryManagerModal.classList.remove('hidden');
 }
 
+// Explicit per-turn scene snapshots: never fabricate past state from today.
+var STORY_SNAPSHOT_LIMIT=40, STORY_SNAPSHOT_BYTES=100000;
+function captureStorySnapshot(conv,msg){
+    if(!conv||!msg||!msg.id)return false;
+    var snap={messageId:msg.id,at:Date.now(),
+        statusCenter:cloneJsonData(conv.statusCenter||{version:2,tables:[],history:[]}),
+        summaries:cloneJsonData(conv.summaries||[]),
+        authorsNote:cloneJsonData(conv.authorsNote||null),
+        mvu:cloneJsonData(conv.mvu||null),
+        worldInfo:cloneJsonData(conv.worldInfo||null),
+        worldBookIds:cloneJsonData(conv.worldBookIds||[]),
+        userPersonaId:conv.userPersonaId||''};
+    if(JSON.stringify(snap).length>STORY_SNAPSHOT_BYTES)return false;
+    if(!conv.storySnapshots||typeof conv.storySnapshots!=='object')conv.storySnapshots={};
+    conv.storySnapshots[msg.id]=snap;
+    var keys=Object.keys(conv.storySnapshots).sort(function(a,b){
+        return(Number(conv.storySnapshots[a].at)||0)-(Number(conv.storySnapshots[b].at)||0);
+    });
+    while(keys.length>STORY_SNAPSHOT_LIMIT)delete conv.storySnapshots[keys.shift()];
+    return true;
+}
+function renderStoryBranchAction(conv,msg,idx){
+    if(!conv||!msg||!msg.id||msg.role==='system')return '';
+    if(!(conv.storySnapshots&&conv.storySnapshots[msg.id])&&idx!==conv.messages.length-1)return '';
+    return '<button class="msg-action-btn" data-action="story-branch" data-msg-idx="'+idx+
+        '" title="从此消息创建剧情分支" aria-label="创建剧情分支">⑂</button>';
+}
+async function createStoryBranch(idx){
+    if(state.isGenerating)return;
+    var source=getActiveConv(),msg=source&&source.messages[idx];
+    if(!msg||!msg.id||msg.role==='system')return;
+    if(!(source.storySnapshots&&source.storySnapshots[msg.id])&&idx===source.messages.length-1)
+        captureStorySnapshot(source,msg);
+    var snapshot=source.storySnapshots&&source.storySnapshots[msg.id];
+    if(!snapshot){
+        await showGlassConfirm('此消息没有历史快照。旧消息不能用当前状态冒充历史状态，请从启用快照后的消息创建分支。',{showCancel:false});
+        return;
+    }
+    var title=await showGlassPrompt('将复制此消息以前的聊天，并恢复该时间点保存的状态、摘要和作者注释。原会话保持不变。',{
+        title:'创建剧情分支',input:{value:(source.title||'聊天')+' · 分支',maxLength:100}});
+    if(title===null||state.isGenerating||getActiveConv()!==source||source.messages[idx]!==msg)return;
+    var copy,fork;
+    try{copy=cloneJsonData(source);fork=cloneJsonData(snapshot);}catch(e){console.error(e);return;}
+    var id=makeId();
+    copy.id=id;copy.title=String(title).trim().slice(0,100)||'剧情分支';copy.titleCustom=true;
+    copy.created=Date.now();copy.updated=Date.now();
+    copy.branchMeta={parentId:source.id,parentMessageId:msg.id,parentIndex:idx,createdAt:copy.created};
+    copy.messages=copy.messages.slice(0,idx+1);
+    copy.statusCenter=fork.statusCenter;
+    copy.summaries=fork.summaries;
+    copy.authorsNote=fork.authorsNote;
+    copy.mvu=fork.mvu;
+    copy.worldInfo=fork.worldInfo;
+    copy.worldBookIds=fork.worldBookIds;
+    copy.userPersonaId=fork.userPersonaId;
+    var eligible=new Set(copy.messages.map(function(m){return m.id;}));
+    Object.keys(copy.storySnapshots||{}).forEach(function(k){
+        if(!eligible.has(k))delete copy.storySnapshots[k];
+    });
+    delete copy._wiCache;delete copy._pendingResponseRegeneration;
+    copy._lastRenderedVisibleCount=0;copy._showAllMessages=false;
+    copy._historyWindow=150;copy._historyScrollHandler=null;
+    try{normalizeConversation(copy);}catch(err){console.error('[Branch] validation failed',err);return;}
+    state.conversations[id]=copy;state.conversationOrder.unshift(id);
+    var ok=await persistState(true);
+    if(!ok){
+        delete state.conversations[id];
+        state.conversationOrder=state.conversationOrder.filter(function(x){return x!==id;});
+        await showGlassConfirm('新分支保存失败，原对话仍保留。请先导出备份。',{showCancel:false});
+        return;
+    }
+    await loadConversation(id);
+}
+
 function archiveCurrentConversation() {
     var conv = getActiveConv();
     if (!conv) return;
@@ -25064,6 +25140,7 @@ function newConversation(charOrChars) {
     normalizeConversation(conv);
     linkConversationCharacterWorldBooks(conv);
     initializeMvuConversation(conv, false);
+    if(conv.messages.length)captureStorySnapshot(conv,conv.messages[conv.messages.length-1]);
 
     state.conversations[conv.id] = conv;
     state.conversationOrder.unshift(conv.id);
@@ -30621,6 +30698,7 @@ function renderMessages() {
                         </button>
                         ${renderFavoriteStarHtml(msg, actualIdx)}
                         ${renderChatImageAction(actualIdx)}
+                        ${renderStoryBranchAction(conv,msg,actualIdx)}
                         ${renderSpeakButton(actualIdx)}
                         <button class="msg-action-btn edit-btn" data-action="edit" data-msg-idx="${actualIdx}" title="${t('edit_msg')}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
                         ${isUser ? renderMessageEditedLabel(msg) : ''}
@@ -30677,6 +30755,7 @@ function renderMessages() {
         html += '<button class="msg-action-btn copy-btn" data-action="copy" data-msg-idx="' + actualIdx + '" title="' + t('copy') + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>';
         html += renderFavoriteStarHtml(msg, actualIdx);
         html += renderChatImageAction(actualIdx);
+        html += renderStoryBranchAction(conv,msg,actualIdx);
         html += renderSpeakButton(actualIdx);
         html += '<button class="msg-action-btn edit-btn" data-action="edit" data-msg-idx="' + actualIdx + '" title="' + t('edit_msg') + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>';
         if (isUser) html += renderMessageEditedLabel(msg);
@@ -30752,6 +30831,7 @@ function renderMessagesFullHistory(conv) {
         html += '<button class="msg-action-btn copy-btn" data-action="copy" data-msg-idx="' + actualIdx + '" title="' + t('copy') + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>';
         html += renderFavoriteStarHtml(msg, actualIdx);
         html += renderChatImageAction(actualIdx);
+        html += renderStoryBranchAction(conv,msg,actualIdx);
         html += renderSpeakButton(actualIdx);
         html += '<button class="msg-action-btn edit-btn" data-action="edit" data-msg-idx="' + actualIdx + '" title="' + t('edit_msg') + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>';
         if (isUser) html += renderMessageEditedLabel(msg);
@@ -36379,6 +36459,7 @@ function sendMessage() {
     if (attachments.length) userMsg.attachments = attachments;
     conv.messages.push(userMsg);
     if (conv.mvu) rebuildMvuSnapshots(conv);
+    captureStorySnapshot(conv,userMsg);
     conv.updated = Date.now();
     conv._wiBudgetWarning = false; // clear previous budget warning on new turn
     if (isAutoManagedConversationTitle(conv) && isPlaceholderConversationTitle(conv.title)) {
@@ -36640,6 +36721,8 @@ function bindEvents() {
             toggleMessageFavorite(idx);
         } else if (action === 'attach-image') {
             if (!state.isGenerating) insertChatImageAtMessage(idx);
+        } else if (action === 'story-branch') {
+            if (!state.isGenerating) createStoryBranch(idx);
         } else if (action === 'speak') {
             speakMessageText(idx, btn);
         } else if (action === 'delete') {
@@ -38304,3 +38387,5 @@ init().then(function() {
 
 <script src="./ot-boot.js"></script>
 <script src="./ot-status.js"></script>
+
+<script src="./ot-rp.js"></script>
