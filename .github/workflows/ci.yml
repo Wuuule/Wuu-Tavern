@@ -1,10 +1,16 @@
 name: Safe upgrade checks
-# A feature push already tests same-repository PRs. Avoid duplicate
-# pull_request jobs and duplicate failure notification emails.
+# One push = one test run. PR sync doesn't duplicate notifications.
 on:
   push:
     branches:
       - 'feature/**'
+    paths:
+      - 'index.html'
+      - 'ot-*.js'
+      - 'worker.js'
+      - 'wuu-ledger.js'
+      - 'tests/**'
+      - '.github/workflows/**'
   workflow_dispatch:
 
 permissions:
@@ -23,13 +29,12 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
-      - name: JavaScript syntax
+      - name: Check all application JavaScript
         run: |
-          node --check ot-boot.js
-          node --check ot-status.js
-          node --check ot-rp.js
-          node --check ot-quick.js
-          node --check ot-memory.js
-          node --check wuu-ledger.js
-      - name: Regression tests
+          set -eu
+          for file in ot-*.js worker.js wuu-ledger.js; do
+            test -f "$file" || continue
+            node --check "$file"
+          done
+      - name: Run all regression tests
         run: node --test tests/*.test.cjs
