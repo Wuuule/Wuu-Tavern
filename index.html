@@ -14675,21 +14675,45 @@ function buildStatusCenterRuntimeMessage(conv) {
 
     parts.push('\n<CURRENT_STATUS_CENTER>\n');
     used = parts.join('').length;
-
+    var activeCharacter = '';
+    try {
+        var speaker = isGroupChat(conv) ? getCurrentSpeakerCharacter(conv) : conv.character;
+        activeCharacter = speaker && speaker.name ? String(speaker.name) : '';
+    } catch (_) {}
+    // Mandatory continuity, selected actor and user state precede unrelated
+    // tables. The entire XML-like block stays balanced even under truncation.
+    tables.sort(function(a,b) {
+        function priority(t) {
+            if (t.name === 'Scene Anchor') return 0;
+            if (t.scope === 'character' && t.character === activeCharacter) return 1;
+            if (t.scope === 'user') return 2;
+            if (t.scope === 'character') return 3;
+            return 4;
+        }
+        return priority(a)-priority(b);
+    });
+    var closing = '</CURRENT_STATUS_CENTER>';
+    var skipped = 0;
     tables.forEach(function(t) {
-        if (used >= OT_STATUS_MAX_INJECT_CHARS) return;
-        var block = '<StatusTable name="' + escapeStatusAttr(t.name) + '"' +
+        var open = '<StatusTable name="' + escapeStatusAttr(t.name) + '"' +
             (t.scope ? ' scope="' + escapeStatusAttr(t.scope) + '"' : '') +
             (t.scope === 'character' && t.character ? ' character="' + escapeStatusAttr(t.character) + '"' : '') +
-            '>\n' + String(t.content || '') + '\n</StatusTable>\n';
-        var remain = OT_STATUS_MAX_INJECT_CHARS - used;
-        if (block.length > remain) block = block.slice(0, Math.max(0, remain));
-        if (block) {
-            parts.push(block);
-            used += block.length;
-        }
+            '>\n';
+        var close = '\n</StatusTable>\n';
+        var free = OT_STATUS_MAX_INJECT_CHARS - used - closing.length - open.length - close.length - 38;
+        if (free <= 32) { skipped++; return; }
+        var content = String(t.content || '');
+        var body = content.length > free ? content.slice(0,Math.max(0,free-30))+
+            '\n[PARTIAL TABLE: truncated by context budget]' : content;
+        var block = open + body + close;
+        parts.push(block);
+        used += block.length;
+        if (body.length < content.length) skipped++;
     });
-    parts.push('</CURRENT_STATUS_CENTER>');
+    if (skipped && used + 36 < OT_STATUS_MAX_INJECT_CHARS) {
+        parts.push('[NOTICE: '+skipped+' table(s) omitted or truncated]\n');
+    }
+    parts.push(closing);
     return parts.join('');
 }
 
