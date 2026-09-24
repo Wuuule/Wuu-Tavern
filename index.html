@@ -14422,6 +14422,23 @@ function readStatusTableName(attrs, fallback) {
     return value || fallback || '';
 }
 
+function readStatusMetadata(attrs) {
+    var s = String(attrs || '').match(/\bscope\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+    var c = String(attrs || '').match(/\bcharacter\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+    var scope = s ? unescapeStatusAttr(s[1] || s[2] || '').toLowerCase().trim() : '';
+    var character = c ? unescapeStatusAttr(c[1] || c[2] || '').trim().slice(0, 80) : '';
+    return { scope: scope === 'character' || scope === 'user' ? scope : '', character: character };
+}
+
+function canonicalStatusTableName(name, scope, character) {
+    var label = String(name || '').trim().slice(0, 120);
+    var who = String(character || '').trim().slice(0, 80);
+    if (scope === 'character' && who && !label.endsWith(' · ' + who)) {
+        return (label + ' · ' + who).slice(0, 120);
+    }
+    return label;
+}
+
 function parseStatusTablesFromBlock(block) {
     var src = String(block || '');
     var tables = [];
@@ -14431,8 +14448,11 @@ function parseStatusTablesFromBlock(block) {
         var name = readStatusTableName(m[1], 'table-' + (tables.length + 1));
         var content = String(m[2] || '').trim();
         if (!name || !content) continue;
+        var meta = readStatusMetadata(m[1]);
         tables.push({
-            name: name.slice(0, 120),
+            name: canonicalStatusTableName(name, meta.scope, meta.character),
+            scope: meta.scope,
+            character: meta.scope === 'character' ? meta.character : '',
             content: content.slice(0, OT_STATUS_MAX_TABLE_CHARS)
         });
         if (tables.length >= OT_STATUS_MAX_TABLES) break;
@@ -14569,7 +14589,9 @@ function applyStatusCenterUpdates(conv, updates) {
 
     updates.forEach(function(update) {
         if (!update) return;
-        var name = String(update.name || '').trim().slice(0, 120);
+        var scope = update.scope === 'character' || update.scope === 'user' ? update.scope : '';
+        var character = scope === 'character' ? String(update.character || '').trim().slice(0, 80) : '';
+        var name = canonicalStatusTableName(update.name, scope, character);
         var content = String(update.content || '').trim().slice(0, OT_STATUS_MAX_TABLE_CHARS);
         if (!name || !content) return;
 
@@ -14581,10 +14603,11 @@ function applyStatusCenterUpdates(conv, updates) {
                 });
                 center.tables.shift();
             }
-            hit = { name: name, content: '', updated: 0, revision: 0 };
+            hit = { name: name, scope: scope, character: character, content: '', updated: 0, revision: 0 };
             center.tables.push(hit);
         }
-
+        if (scope && !hit.scope) hit.scope = scope;
+        if (character && !hit.character) hit.character = character;
         if (hit.content !== content) {
             rememberStatusCenterRevision(center, hit, 'model-update');
             hit.content = content;
@@ -14606,6 +14629,8 @@ function getStatusCenterTables(conv) {
     return center.tables.map(function(t) {
         return {
             name: String(t.name || ''),
+            scope: String(t.scope || ''),
+            character: String(t.character || ''),
             content: String(t.content || ''),
             updated: Number(t.updated) || 0,
             revision: Number(t.revision) || 0
@@ -14628,7 +14653,9 @@ function buildStatusCenterRuntimeMessage(conv) {
         '1. 正常输出故事正文；禁止在正文、选项、可见 HUD 中打印状态中心表。\n' +
         '2. 每个主回复末尾必须输出且只输出一个 <OTStatusUpdate>...</OTStatusUpdate> 传输块；它不是给玩家看的。\n' +
         '3. 每轮必须更新名为 "Scene Anchor" 的表：只记录当前时间/阶段、地点、在场人物、刚刚发生、当前悬点、必须保持的连续性；保持简洁。\n' +
-        '4. 角色卡/世界书若定义了其他状态追踪规则，按规则更新对应表；有变化的表输出“更新后的完整表”。没有定义业务表时不要自行发明，只维护 Scene Anchor。\n' +
+        '4. 角色卡/世界书若定义了其他状态追踪规则，按规则更新对应表；有变化的表输出“更新后的完整表”。不要自行发明未经剧情确认的数值。\n' +
+        '4a. 人物当前状态与玩家当前状态必须独立存放：角色逐人输出 <StatusTable name="角色状态" scope="character" character="角色名">；玩家输出 <StatusTable name="玩家状态" scope="user">；只记录剧情确认的状态，缺失则保持为空，不能造数值。\n' +
+        '4b. 群聊只更新已变化角色，保留其他角色旧状态；角色名与角色卡成员一致，旧式无 scope 的表保持兼容。\n' +
         '5. 完成/历史类表若内容规则要求只追加，则保留旧事实后追加；人物关系不得因再次见面自动重置。\n' +
         '6. 相对预约应尽量同时保存绝对锚点（如第N天到期）与当前剩余量，避免“还剩5天”永久不变。\n' +
         '7. 传输块格式：\n' +
@@ -14648,8 +14675,10 @@ function buildStatusCenterRuntimeMessage(conv) {
 
     tables.forEach(function(t) {
         if (used >= OT_STATUS_MAX_INJECT_CHARS) return;
-        var block = '<StatusTable name="' + escapeStatusAttr(t.name) + '">\n' +
-            String(t.content || '') + '\n</StatusTable>\n';
+        var block = '<StatusTable name="' + escapeStatusAttr(t.name) + '"' +
+            (t.scope ? ' scope="' + escapeStatusAttr(t.scope) + '"' : '') +
+            (t.scope === 'character' && t.character ? ' character="' + escapeStatusAttr(t.character) + '"' : '') +
+            '>\n' + String(t.content || '') + '\n</StatusTable>\n';
         var remain = OT_STATUS_MAX_INJECT_CHARS - used;
         if (block.length > remain) block = block.slice(0, Math.max(0, remain));
         if (block) {
@@ -14659,6 +14688,47 @@ function buildStatusCenterRuntimeMessage(conv) {
     });
     parts.push('</CURRENT_STATUS_CENTER>');
     return parts.join('');
+}
+
+function getStatusPanels(conv) {
+    if (!conv) return { conversationId: null, user: null, characters: [] };
+    var tables = getStatusCenterTables(conv);
+    var group = isGroupChat(conv) ? getGroupMembers(conv).map(function(x) { return x.character; }) : [];
+    var chars = group.length ? group : (conv.character ? [conv.character] : []);
+    var members = chars.filter(Boolean).map(function(c) { return String(c.name || '').trim(); }).filter(Boolean);
+    var userName = state.settings && state.settings.userName ? String(state.settings.userName) : '玩家';
+    var persona = conv.userPersonaId && typeof getUserPersonaById === 'function'
+        ? getUserPersonaById(conv.userPersonaId) : null;
+    if (persona && persona.userName) userName = persona.userName;
+    var userTables = tables.filter(function(t) {
+        return t.scope === 'user' || (!t.scope && /^(玩家状态|用户状态|User Status)$/i.test(t.name));
+    });
+    var charPanels = members.map(function(name) {
+        var namedTables = tables.filter(function(t) {
+            if (t.scope === 'character') return String(t.character || '') === name;
+            if (t.scope) return false;
+            return t.name === '角色状态 · ' + name || t.name === '人物状态 · ' + name ||
+                t.name === '角色状态：' + name || t.name === '角色状态:' + name;
+        });
+        // Legacy mixed table: show only lines starting with an exact character name.
+        // Unknown rows stay in the existing generic Status Center, never misattribute.
+        if (!namedTables.length) {
+            tables.filter(function(t) { return !t.scope && t.name === '状态表'; }).forEach(function(t) {
+                var lines = String(t.content || '').split(/\r?\n/).filter(function(line) {
+                    var trimmed = line.trim();
+                    return trimmed.startsWith(name + ' |') || trimmed.startsWith(name + '|') ||
+                        trimmed.startsWith(name + '：') || trimmed.startsWith(name + ':');
+                });
+                if (lines.length) namedTables.push({ name: t.name, content: lines.join('\n'), updated: t.updated, revision: t.revision });
+            });
+        }
+        return { name: name, content: namedTables.map(function(t) { return t.content; }).join('\n\n'),
+            tables: namedTables.map(function(t) { return t.name; }) };
+    });
+    return { conversationId: conv.id || null, user: { name: userName,
+            content: userTables.map(function(t) { return t.content; }).join('\n\n'),
+            tables: userTables.map(function(t) { return t.name; }) },
+        characters: charPanels };
 }
 
 window.OpenTavernStatusCenterRuntime = {
@@ -14681,6 +14751,9 @@ window.OpenTavernStatusCenterRuntime = {
     },
     listTableHistory: function(tableName) {
         return getStatusCenterHistory(getActiveConv(), String(tableName || ''));
+    },
+    getPanels: function() {
+        return getStatusPanels(getActiveConv());
     },
     restoreRevision: function(tableName, revision) {
         return restoreStatusCenterRevision(getActiveConv(), String(tableName || ''), revision);
