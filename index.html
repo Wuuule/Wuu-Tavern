@@ -14512,6 +14512,7 @@ function stripStatusTransportForDisplay(text, allowPartial) {
 
     // Backward compatibility with standalone table blocks from older cards.
     src = src.replace(/<(?:StatusTable|OTTable|Ledger)\b[^>]*>[\s\S]*?<\/(?:StatusTable|OTTable|Ledger)>/gi, '');
+    src = src.replace(/<MemoryItem\b[^>]*>[\s\S]*?<\/MemoryItem>/gi, '');
 
     if (allowPartial) {
         var cuts = [];
@@ -14528,10 +14529,12 @@ function stripStatusTransportForDisplay(text, allowPartial) {
 function consumeStatusCenterUpdate(conv, rawText) {
     var src = String(rawText == null ? '' : rawText);
     var updates = [];
+    var memories = [];
     var wrapperRe = /<OTStatusUpdate\b[^>]*>([\s\S]*?)<\/OTStatusUpdate>/gi;
     var m;
     while ((m = wrapperRe.exec(src))) {
         updates = updates.concat(parseStatusTablesFromBlock(m[1]));
+        memories = memories.concat(parseAutoMemoriesFromBlock(m[1]));
     }
 
     // Compatibility path for cards that still emit bare <StatusTable> blocks.
@@ -14541,7 +14544,8 @@ function consumeStatusCenterUpdate(conv, rawText) {
 
     return {
         visibleText: stripStatusTransportForDisplay(src, true),
-        updates: updates
+        updates: updates,
+        memories: memories.slice(0,AUTO_MEMORY_PER_TURN)
     };
 }
 
@@ -14686,6 +14690,9 @@ function getStatusCenterTables(conv) {
 var statusPromptDiagnostics = Object.create(null);
 
 var PIN_MEMORY_LIMIT=40, PIN_MEMORY_PROMPT_CHARS=4500;
+var AUTO_MEMORY_LIMIT = 80;
+var AUTO_MEMORY_PROMPT_CHARS = 5000;
+var AUTO_MEMORY_PER_TURN = 2;
 function fingerprintMessage(text) {
     var raw=String(text||''),h=2166136261;
     for(var k=0;k<raw.length;k++){h^=raw.charCodeAt(k);h=Math.imul(h,16777619);}
@@ -14745,7 +14752,97 @@ function invalidatePinnedMemoriesAfter(conv,index){
     var affected=new Set((conv.messages||[]).slice(Math.max(0,index))
         .map(function(m){return m&&m.id;}).filter(Boolean));
     conv.pinnedMemories.forEach(function(m){if(m&&affected.has(m.messageId))m.stale=true;});
+    if(Array.isArray(conv.autoMemories)){
+        conv.autoMemories.forEach(function(m){if(m&&affected.has(m.messageId))m.stale=true;});
+    }
 }
+function readAutoMemories(conv){
+    if(!conv)return [];
+    var lookup=Object.create(null);
+    (conv.messages||[]).forEach(function(m){if(m&&m.id)lookup[m.id]=m;});
+    return (Array.isArray(conv.autoMemories)?conv.autoMemories:[]).slice(-AUTO_MEMORY_LIMIT)
+        .filter(function(m){return !!(m&&m.id&&m.messageId&&m.text);})
+        .map(function(m){
+            var source=lookup[m.messageId];
+            return {id:m.id,messageId:m.messageId,text:String(m.text).slice(0,500),
+                createdAt:Number(m.createdAt)||0,importance:String(m.importance||'normal'),
+                stale:!!m.stale||!source||fingerprintMessage(source.content)!==m.fingerprint};
+        });
+}
+function normalizeAutoMemoryText(value){
+    return String(value||'').replace(/\s+/g,' ').trim().slice(0,500);
+}
+function parseAutoMemoriesFromBlock(block){
+    var out=[],src=String(block||''),re=/<MemoryItem\b([^>]*)>([\s\S]*?)<\/MemoryItem>/gi,m;
+    while((m=re.exec(src))&&out.length<AUTO_MEMORY_PER_TURN){
+        var text=normalizeAutoMemoryText(m[2]);
+        if(!text)continue;
+        var im=String(m[1]||'').match(/\bimportance\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+        var importance=String(im&&(im[1]||im[2])||'normal').toLowerCase();
+        if(['high','normal'].indexOf(importance)<0)importance='normal';
+        out.push({text:text,importance:importance});
+    }
+    return out;
+}
+function applyAutoMemories(conv,sourceMessage,items){
+    if(!conv||!sourceMessage||conv.autoMemoryEnabled!==true||!Array.isArray(items)||!items.length)return false;
+    if(!Array.isArray(conv.autoMemories))conv.autoMemories=[];
+    var existing=new Set(readAutoMemories(conv).filter(function(x){return !x.stale;})
+        .map(function(x){return normalizeAutoMemoryText(x.text).toLowerCase();}));
+    var changed=false;
+    items.slice(0,AUTO_MEMORY_PER_TURN).forEach(function(item){
+        var text=normalizeAutoMemoryText(item&&item.text),key=text.toLowerCase();
+        if(!text||existing.has(key))return;
+        conv.autoMemories.push({id:makeId(),messageId:sourceMessage.id,text:text,
+            importance:item.importance==='high'?'high':'normal',createdAt:Date.now(),
+            fingerprint:fingerprintMessage(sourceMessage.content),stale:false});
+        existing.add(key);changed=true;
+    });
+    if(conv.autoMemories.length>AUTO_MEMORY_LIMIT)conv.autoMemories=conv.autoMemories.slice(-AUTO_MEMORY_LIMIT);
+    if(changed)window.dispatchEvent(new CustomEvent('ot-auto-memory-updated'));
+    return changed;
+}
+async function deleteAutoMemory(id){
+    var conv=getActiveConv();
+    if(!conv||state.isGenerating||!Array.isArray(conv.autoMemories))return false;
+    var before=conv.autoMemories.slice();
+    conv.autoMemories=before.filter(function(x){return x&&x.id!==id;});
+    if(before.length===conv.autoMemories.length)return false;
+    try{
+        if(await persistState(true)===true){
+            window.dispatchEvent(new CustomEvent('ot-auto-memory-updated'));return true;
+        }
+    }catch(err){console.error('[Auto memory] Remove failed',err);}
+    conv.autoMemories=before;return false;
+}
+async function setAutoMemoryEnabled(enabled){
+    var conv=getActiveConv();
+    if(!conv||state.isGenerating)return false;
+    var previous=conv.autoMemoryEnabled===true;
+    conv.autoMemoryEnabled=!!enabled;
+    try{
+        if(await persistState(true)===true){
+            window.dispatchEvent(new CustomEvent('ot-auto-memory-updated'));return true;
+        }
+    }catch(err){console.error('[Auto memory] Setting save failed',err);}
+    conv.autoMemoryEnabled=previous;return false;
+}
+function buildAutoMemoryPrompt(conv){
+    if(!conv||conv.autoMemoryEnabled!==true)return '';
+    var current=readAutoMemories(conv).filter(function(m){return !m.stale;});
+    if(!current.length)return '';
+    current.sort(function(a,b){
+        var ai=a.importance==='high'?0:1,bi=b.importance==='high'?0:1;
+        return ai-bi||a.createdAt-b.createdAt;
+    });
+    var output='【自动长期记忆】\n这些事实来自先前助手回复并带来源校验；若与较新的用户说明冲突，以最新用户说明为准。不得在正文复述记忆列表。\n';
+    current.forEach(function(m){
+        var line='- '+m.text+'\n';
+        if(output.length+line.length<=AUTO_MEMORY_PROMPT_CHARS)output+=line;
+    });
+    return output;
+}
+
 function buildPinnedMemoryPrompt(conv){
     var current=readPinnedMemories(conv).filter(function(m){return !m.stale;});
     if(!current.length)return '';
@@ -14793,9 +14890,13 @@ function buildStatusCenterRuntimeMessage(conv) {
         '5. 完成/历史类表若内容规则要求只追加，则保留旧事实后追加；人物关系不得因再次见面自动重置。\n' +
         '6. 相对预约应尽量同时保存绝对锚点（如第N天到期）与当前剩余量，避免“还剩5天”永久不变。\n' +
         '7. 传输块格式：\n' +
+        (conv.autoMemoryEnabled===true
+            ? '7a. 仅当本轮出现跨多轮仍有价值的稳定事实（重要承诺、身份/关系永久变化、重大揭示、长期偏好）时，可在传输块加入最多2条 <MemoryItem importance="high|normal">事实</MemoryItem>。不要保存即时动作、重复剧情、猜测、内心分析或普通对白。\n'
+            : '') +
         '<OTStatusUpdate>\n' +
         '<StatusTable name="Scene Anchor">...</StatusTable>\n' +
         '<StatusTable name="由内容规则定义的表名">...</StatusTable>\n' +
+        (conv.autoMemoryEnabled===true ? '<MemoryItem importance="normal">可长期保留的事实</MemoryItem>\n' : '') +
         '</OTStatusUpdate>\n'
     );
 
@@ -14931,6 +15032,10 @@ window.OpenTavernStatusCenterRuntime = {
     listPinnedMemories: function(){return readPinnedMemories(getActiveConv());},
     addPinnedMemory: function(id,text){return addPinnedMemory(id,text);},
     deletePinnedMemory: function(id){return deletePinnedMemory(id);},
+    listAutoMemories: function(){return readAutoMemories(getActiveConv());},
+    isAutoMemoryEnabled: function(){var c=getActiveConv();return !!(c&&c.autoMemoryEnabled===true);},
+    setAutoMemoryEnabled: function(enabled){return setAutoMemoryEnabled(enabled);},
+    deleteAutoMemory: function(id){return deleteAutoMemory(id);},
     restoreRevision: function(tableName, revision) {
         return restoreStatusCenterRevision(getActiveConv(), String(tableName || ''), revision);
     }
@@ -19225,6 +19330,8 @@ function buildMessagesForAPI(generationType) {
 
     var pinnedMemoryMessage = buildPinnedMemoryPrompt(conv);
     if(pinnedMemoryMessage)apiMessages.push({role:'system',content:pinnedMemoryMessage});
+    var autoMemoryMessage = buildAutoMemoryPrompt(conv);
+    if(autoMemoryMessage)apiMessages.push({role:'system',content:autoMemoryMessage});
     var statusCenterRuntimeMessage = buildStatusCenterRuntimeMessage(conv);
     if (statusCenterRuntimeMessage) {
         apiMessages.push({ role: 'system', content: statusCenterRuntimeMessage });
@@ -24475,6 +24582,9 @@ function finishAssistantMessage(conv, fullContent, speakerForMsg, stage, parentI
     // Completed message replaces any in-progress draft.
     if (pushObj.incomplete) delete pushObj.incomplete;
     conv.messages.push(pushObj);
+    if(stage!=='second'&&statusCenterResult&&statusCenterResult.memories&&statusCenterResult.memories.length){
+        applyAutoMemories(conv,pushObj,statusCenterResult.memories);
+    }
     if (stage !== 'second' && statusCenterResult && statusCenterResult.updates && statusCenterResult.updates.length) {
         applyStatusCenterUpdates(conv, statusCenterResult.updates);
     }
