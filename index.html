@@ -13071,6 +13071,11 @@ function normalizeResponseVersionRecord(record, conv, msg) {
     if (record.userMessageId) normalized.userMessageId = String(record.userMessageId);
     if (record.userVersionId) normalized.userVersionId = String(record.userVersionId);
     if (typeof record.userContent !== 'undefined') normalized.userContent = String(record.userContent || '');
+    // Legacy records stay unversioned unless an authentic snapshot exists.
+    if (record.statusCenter && typeof record.statusCenter === 'object' &&
+        Array.isArray(record.statusCenter.tables)) {
+        normalized.statusCenter = cloneJsonData(record.statusCenter);
+    }
     return normalized;
 }
 
@@ -23330,6 +23335,16 @@ function prepareResponseRegeneration(conv, msg) {
     var insertIndex = conv.messages.indexOf(msg);
     if (insertIndex < 0) return null;
     var linked = msg.stage === 'second' ? [] : getLinkedSecondStageMessages(conv, msg);
+    // If an old reply was created before version snapshots existed, we can
+    // capture its state only when it is the latest narrative turn.
+    if (msg.stage !== 'second' && !conv.messages.slice(insertIndex + 1).some(function(m) {
+        return m && m.role === 'user';
+    })) {
+        var activeRecord = msg.responseVersions && msg.responseVersions[msg.activeResponseVersion];
+        if (activeRecord && !activeRecord.statusCenter && beforeStatusCenter) {
+            activeRecord.statusCenter = cloneJsonData(beforeStatusCenter);
+        }
+    }
     var originalMessages = [msg].concat(linked).map(function(item) { return cloneJsonData(item); });
     var pending = {
         targetId: msg.id,
@@ -24254,6 +24269,11 @@ function finishAssistantMessage(conv, fullContent, speakerForMsg, stage, parentI
         delete conv._pendingResponseRegeneration;
     } else {
         ensureResponseVersions(conv, pushObj);
+    }
+    // Immutable per-reply status snapshot: never overwrite it with later turns.
+    if (stage !== 'second' && pushObj.responseVersions[pushObj.activeResponseVersion]) {
+        pushObj.responseVersions[pushObj.activeResponseVersion].statusCenter =
+            cloneJsonData(conv.statusCenter || {version:2,tables:[],history:[]});
     }
     if (parentId) {
         var parent = conv.messages.find(function(msg) { return msg && msg.id === parentId; });
@@ -35186,7 +35206,7 @@ function openReplyHistory(actualIdx) {
     persistState();
 }
 
-function switchResponseVersion(actualIdx, versionIdx) {
+async function switchResponseVersion(actualIdx, versionIdx) {
     if (state.isGenerating) return;
     var conv = getActiveConv();
     if (!conv) return;
@@ -35198,6 +35218,24 @@ function switchResponseVersion(actualIdx, versionIdx) {
 
     var stableId = msg.id;
     var selected = versions[versionIdx];
+    // Never silently replay a historical answer over subsequent story turns.
+    if (msg.stage !== 'second' && conv.messages.slice(actualIdx + 1).some(function(m) {
+        return m && m.role === 'user';
+    })) {
+        await showGlassConfirm('后面已有剧情，请从这条消息创建新分支后再选择不同回复，防止后续状态与故事冲突。',{
+            title:'历史剧情保护',showCancel:false
+        });
+        return;
+    }
+    if (msg.stage !== 'second' && !selected.statusCenter) {
+        var proceed = await showGlassConfirm('旧版回复没有可信的状态快照。只能切换文本，不能安全恢复当时状态。继续吗？',{
+            title:'旧版回复',showCancel:true,okText:'仅切换文本'
+        });
+        if (!proceed || state.isGenerating || getActiveConv()!==conv ||
+            conv.messages[actualIdx]!==msg) return;
+    }
+    invalidatePinnedMemoriesAfter(conv,actualIdx);
+    invalidateStorySnapshotsAfter(conv,actualIdx);
     var restoredUser = restoreResponseUserVersion(conv, msg, selected);
     if (msg.stage !== 'second') removeLinkedSecondStageMessages(conv, msg);
 
@@ -35221,7 +35259,10 @@ function switchResponseVersion(actualIdx, versionIdx) {
         });
         conv.messages.splice.apply(conv.messages, [parentIdx + 1, 0].concat(restoredLinked));
     }
-
+    if (msg.stage !== 'second' && selected.statusCenter) {
+        conv.statusCenter = cloneJsonData(selected.statusCenter);
+        notifyStatusCenterUpdated(conv);
+    }
     conv.updated = Date.now();
     conv._wiCache = null;
     conv._lastRenderedVisibleCount = 0;
@@ -35229,10 +35270,16 @@ function switchResponseVersion(actualIdx, versionIdx) {
         invalidateConversationAfterUserEdit(conv, restoredUser.index);
     }
     if (conv.mvu) rebuildMvuSnapshots(conv);
-    persistState();
+    if (msg.stage !== 'second') captureStorySnapshot(conv,msg);
+    var saved = false;
+    try { saved = await persistState(true) === true; }
+    catch(err) { console.error('[Swipes] Save failed',err); }
     renderMessagesOnly();
     renderConversationListOnly();
     openReplyHistory(conv.messages.indexOf(msg));
+    if (!saved) await showGlassConfirm('回复已经在当前页面切换，但尚未成功保存。请立即导出备份，暂时不要关闭页面。',{
+        title:'存储异常',showCancel:false
+    });
 }
 
 async function requestDeleteMessage(actualIdx) {
