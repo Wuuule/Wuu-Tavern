@@ -3370,6 +3370,17 @@ body.theme-momotalk .continue-btn:hover {
                 </div>
             </div>
             <div class="glass rounded-2xl p-3 border border-white/5">
+                <div class="mb-3">
+                    <label class="text-xs font-semibold text-zinc-400 uppercase tracking-wider" for="completionSource">聊天补全来源</label>
+                    <select id="completionSource" class="w-full mt-1.5 px-3 py-2 text-sm glass rounded-xl text-zinc-200 focus:outline-none focus:ring-2 focus:ring-amber-500/30">
+                        <option value="auto">自动识别（推荐）</option>
+                        <option value="openai">OpenAI / OpenAI-Compatible</option>
+                        <option value="openrouter">OpenRouter</option>
+                        <option value="deepseek">DeepSeek</option>
+                        <option value="generic">通用兼容模式</option>
+                    </select>
+                    <p id="completionSourceHint" class="text-[10px] text-zinc-600 mt-1 leading-relaxed">自动根据 API Endpoint 选择推理参数与解析方式；不会改变角色提示词。</p>
+                </div>
                 <div class="flex items-center justify-between gap-3">
                     <div class="min-w-0 flex-1">
                         <label class="text-xs font-semibold text-zinc-400 uppercase tracking-wider" data-i18n="settings_cot_request_label">请求 CoT</label>
@@ -3387,6 +3398,16 @@ body.theme-momotalk .continue-btn:hover {
                     </div>
                     <label class="relative inline-flex items-center cursor-pointer flex-shrink-0 ml-3">
                         <input type="checkbox" id="showCotEnabled" class="sr-only peer">
+                        <div class="w-9 h-5 bg-white/10 rounded-full peer-checked:bg-amber-500/60 peer-checked:ring-1 peer-checked:ring-amber-500/40 transition-all after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4"></div>
+                    </label>
+                </div>
+                <div class="flex items-center justify-between gap-3 mt-3">
+                    <div class="min-w-0 flex-1">
+                        <label class="text-xs font-semibold text-zinc-400 uppercase tracking-wider">回传历史推理</label>
+                        <p class="text-[10px] text-zinc-600 mt-0.5 break-words">默认关闭。仅在来源协议明确支持时回传；DeepSeek 使用 reasoning_content，OpenRouter 只回传已保存的结构化 reasoning_details，避免把普通 CoT 文本伪装成签名推理。</p>
+                    </div>
+                    <label class="relative inline-flex items-center cursor-pointer flex-shrink-0 ml-3">
+                        <input type="checkbox" id="includeReasoningInHistory" class="sr-only peer">
                         <div class="w-9 h-5 bg-white/10 rounded-full peer-checked:bg-amber-500/60 peer-checked:ring-1 peer-checked:ring-amber-500/40 transition-all after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4"></div>
                     </label>
                 </div>
@@ -11267,6 +11288,8 @@ function defaultSettings() {
         twoStagePostHistoryInstructions: '',
         requestCotEnabled: true,
         showCotEnabled: true,
+        completionSource: 'auto',
+        includeReasoningInHistory: false,
         reasoningEffortEnabled: false,
         reasoningEffort: 'medium',
         thinkingEnabled: false,
@@ -12517,10 +12540,19 @@ function stripInternalMessageMetadata(messages) {
             }).filter(Boolean);
             return { role: role, content: parts };
         }
-        return {
+        var normalized = {
             role: role,
             content: content != null ? String(content) : ''
         };
+        if (role === 'assistant' && message) {
+            if (typeof message.reasoning_content === 'string' && message.reasoning_content) {
+                normalized.reasoning_content = message.reasoning_content;
+            }
+            if (Array.isArray(message.reasoning_details) && message.reasoning_details.length) {
+                normalized.reasoning_details = cloneJsonData(message.reasoning_details);
+            }
+        }
+        return normalized;
     }).filter(function(message) {
         if (Array.isArray(message.content)) {
             return message.content.some(function(part) {
@@ -19036,6 +19068,14 @@ function buildMessagesForAPI(generationType) {
             historyContent = stripStatusTransportForDisplay(historyContent, true);
         }
         var copy = { role: m.role, content: historyContent };
+        if (String(m.role || '').toLowerCase() === 'assistant' && state.settings.includeReasoningInHistory === true) {
+            var histSource = resolveCompletionSource(state.settings, {});
+            if (histSource === 'deepseek' && m.cot) copy._reasoningContent = String(m.cot);
+            if (histSource === 'openrouter' && m.reasoningMeta && m.reasoningMeta.structuredReasoningComplete &&
+                Array.isArray(m.reasoningMeta.reasoningDetails) && m.reasoningMeta.reasoningDetails.length) {
+                copy._reasoningDetails = cloneJsonData(m.reasoningMeta.reasoningDetails);
+            }
+        }
         if (String(m.role || '').toLowerCase() === 'user') {
             var images = getUserVisionAttachments(m);
             if (images.length) copy._userImages = images;
@@ -19159,6 +19199,8 @@ function buildMessagesForAPI(generationType) {
         };
         if (m._isDialogueExample) message._isDialogueExample = true;
         if (m._userImages && m._userImages.length) message._userImages = m._userImages;
+        if (m._reasoningContent) message.reasoning_content = m._reasoningContent;
+        if (m._reasoningDetails && m._reasoningDetails.length) message.reasoning_details = cloneJsonData(m._reasoningDetails);
         return message;
     });
 
@@ -21520,8 +21562,22 @@ function processTimedEffects(conv, activatedEntries) {
 }
 
 // ==================== API Client ====================
+function reasoningDetailsToText(details) {
+    if (!Array.isArray(details)) return '';
+    return details.map(function(part) {
+        if (!part) return '';
+        if (typeof part === 'string') return part;
+        if (typeof part.text === 'string') return part.text;
+        if (typeof part.content === 'string') return part.content;
+        if (part.summary && typeof part.summary === 'string') return part.summary;
+        return '';
+    }).filter(Boolean).join('');
+}
+
 function extractCotDelta(delta) {
     if (!delta) return '';
+    var fromDetails = reasoningDetailsToText(delta.reasoning_details);
+    if (fromDetails) return fromDetails;
     var val = delta.reasoning_content || delta.reasoning || delta.thinking || delta.cot;
     if (typeof val === 'string') return val;
     if (val && typeof val.content === 'string') return val.content;
@@ -22144,11 +22200,11 @@ function createStreamLifecycle(onToken, onComplete, onError) {
         }
     }
 
-    function settle(kind, a, b, c) {
+    function settle(kind, a, b, c, d) {
         if (settled) return;
         settled = true;
         clearIdleTimers();
-        if (kind === 'complete') onComplete(a, b, c);
+        if (kind === 'complete') onComplete(a, b, c, d);
         else onError(a);
     }
 
@@ -22201,10 +22257,10 @@ function createStreamLifecycle(onToken, onComplete, onError) {
             fullCot = cot == null ? fullCot : String(cot);
             onToken(token, fullContent, fullCot);
         },
-        complete: function(content, cot, usage) {
+        complete: function(content, cot, usage, meta) {
             if (content != null) fullContent = String(content);
             if (cot != null) fullCot = String(cot);
-            settle('complete', fullContent, fullCot, usage);
+            settle('complete', fullContent, fullCot, usage, meta);
         },
         error: function(err) {
             settle('error', err);
@@ -22265,7 +22321,7 @@ function shouldRetryStreamAsNonStream(status, text) {
 
 function parseChatCompletionBody(text) {
     var raw = text == null ? '' : String(text).replace(/^\uFEFF/, '');
-    var result = { content: '', finishReason: '', errorMessage: '', html: false, gzip: false, data: null };
+    var result = { content: '', finishReason: '', errorMessage: '', html: false, gzip: false, data: null, reasoningDetails: null };
     if (!raw) return result;
     if (raw.charCodeAt(0) === 0x1f) {
         result.gzip = true;
@@ -22287,6 +22343,9 @@ function parseChatCompletionBody(text) {
             if (choice) {
                 if (choice.finish_reason) result.finishReason = String(choice.finish_reason);
                 if (choice.message && choice.message.content != null) result.content = String(choice.message.content);
+                if (choice.message && Array.isArray(choice.message.reasoning_details)) {
+                    result.reasoningDetails = cloneJsonData(choice.message.reasoning_details);
+                }
             }
             if (result.content || result.errorMessage || choice) return result;
         } catch (e) {}
@@ -22332,6 +22391,79 @@ function rememberBufferedStreamProgress(content, cot) {
         var ui = noteActiveStreamUiState(conv, content, label, cot);
         updateStreamingDraftInMemory(conv, ui);
     } catch (e) {}
+}
+
+function normalizeCompletionSource(value) {
+    var v = String(value || '').trim().toLowerCase();
+    return ['auto','openai','openrouter','deepseek','generic'].indexOf(v) >= 0 ? v : 'auto';
+}
+
+function detectCompletionSource(endpoint, model) {
+    var url = String(endpoint || '').toLowerCase();
+    var name = String(model || '').toLowerCase();
+    if (url.indexOf('openrouter.ai') >= 0) return 'openrouter';
+    if (url.indexOf('api.deepseek.com') >= 0 || name.indexOf('deepseek-') === 0) return 'deepseek';
+    if (url.indexOf('api.openai.com') >= 0) return 'openai';
+    return 'generic';
+}
+
+function resolveCompletionSource(settings, requestOptions) {
+    settings = settings || {};
+    requestOptions = requestOptions || {};
+    var selected = normalizeCompletionSource(
+        requestOptions.completionSource != null ? requestOptions.completionSource : settings.completionSource
+    );
+    return selected === 'auto'
+        ? detectCompletionSource(requestOptions.apiEndpoint || settings.apiEndpoint, requestOptions.model || settings.model)
+        : selected;
+}
+
+function updateCompletionSourceHint() {
+    if (!dom || !dom.completionSourceHint) return;
+    var selected = dom.completionSource ? normalizeCompletionSource(dom.completionSource.value) : 'auto';
+    var effective = selected === 'auto'
+        ? detectCompletionSource(dom.apiEndpoint ? dom.apiEndpoint.value : state.settings.apiEndpoint,
+            dom.modelName ? dom.modelName.value : state.settings.model)
+        : selected;
+    var labels = { openai:'OpenAI', openrouter:'OpenRouter', deepseek:'DeepSeek', generic:'通用兼容' };
+    var note = effective === 'openrouter'
+        ? '使用 OpenRouter reasoning 参数并解析 reasoning / reasoning_details。'
+        : effective === 'deepseek'
+        ? '使用 DeepSeek reasoning_effort / thinking，并解析 reasoning_content。'
+        : effective === 'openai'
+        ? '使用 OpenAI 风格 reasoning_effort；不会发送 Anthropic thinking 对象。'
+        : '保留原有通用兼容行为，同时发送用户明确开启的 reasoning_effort / thinking。';
+    dom.completionSourceHint.textContent = '当前有效来源：' + (labels[effective] || effective) + '。' + note;
+}
+
+function applyCompletionSourceReasoning(payload, settings, requestOptions, captureCot) {
+    var source = resolveCompletionSource(settings, requestOptions);
+    // Start from a clean provider-specific shape. Generic deliberately keeps the old compatibility behavior.
+    if (source === 'openrouter') {
+        delete payload.reasoning_effort;
+        delete payload.thinking;
+        var orEffort = resolveReasoningEffortForRequest(settings, requestOptions);
+        if (orEffort) payload.reasoning = { effort: orEffort };
+        else delete payload.reasoning;
+        if (captureCot) payload.include_reasoning = true;
+        else delete payload.include_reasoning;
+    } else if (source === 'deepseek') {
+        delete payload.reasoning;
+        delete payload.include_reasoning;
+        applyReasoningEffortToPayload(payload, settings, requestOptions);
+        applyThinkingToPayload(payload, settings, requestOptions);
+    } else if (source === 'openai') {
+        delete payload.reasoning;
+        delete payload.include_reasoning;
+        delete payload.thinking;
+        applyReasoningEffortToPayload(payload, settings, requestOptions);
+    } else {
+        delete payload.reasoning;
+        delete payload.include_reasoning;
+        applyReasoningEffortToPayload(payload, settings, requestOptions);
+        applyThinkingToPayload(payload, settings, requestOptions);
+    }
+    return source;
 }
 
 function normalizeReasoningEffortLevel(value) {
@@ -22459,8 +22591,7 @@ function streamChatWithMessages(messages, onToken, onComplete, onError, requestO
         top_p: typeof requestOptions.topP === 'number' ? requestOptions.topP : settings.topP,
         stream: useStream
     };
-    applyReasoningEffortToPayload(payload, settings, requestOptions);
-    applyThinkingToPayload(payload, settings, requestOptions);
+    var completionSource = applyCompletionSourceReasoning(payload, settings, requestOptions, captureCot);
     function applyStreamPayloadFlags(streamOn) {
         payload.stream = !!streamOn;
         if (payload.stream && !shouldUseOllamaCompat(settings.apiEndpoint) && !settings.ollamaCompatMode) {
@@ -22482,12 +22613,12 @@ function streamChatWithMessages(messages, onToken, onComplete, onError, requestO
         life.token(delta, content, cot);
     }
 
-    function completeWithParts(content, cot, usageMeta) {
+    function completeWithParts(content, cot, usageMeta, reasoningMeta) {
         if (life.isSettled()) return;
         finishGenerating();
         var parts = captureCot ? splitInlineCot(content || '', cot || '') : { content: content || '', cot: cot || '' };
         life.noteText(parts.content, parts.cot);
-        life.complete(parts.content, parts.cot, usageMeta);
+        life.complete(parts.content, parts.cot, usageMeta, reasoningMeta || { source: completionSource });
     }
 
     function failHttp(status, text) {
@@ -22546,7 +22677,11 @@ function streamChatWithMessages(messages, onToken, onComplete, onError, requestO
                 var parts = captureCot ? splitInlineCot(fullContent, fullCot) : { content: fullContent, cot: '' };
                 var elapsed = ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()) - nonStreamStartedAt;
                 var usageMeta = finalizeUsageMeta(parseApiUsage(parsed.data), elapsed);
-                completeWithParts(parts.content, parts.cot, usageMeta);
+                completeWithParts(parts.content, parts.cot, usageMeta, {
+                    source: completionSource,
+                    reasoningDetails: parsed.reasoningDetails && parsed.reasoningDetails.length ? parsed.reasoningDetails : null,
+                    structuredReasoningComplete: !!(parsed.reasoningDetails && parsed.reasoningDetails.length)
+                });
             });
         }).catch(function(e) {
             if (life.isSettled()) return;
@@ -22604,7 +22739,11 @@ function streamChatWithMessages(messages, onToken, onComplete, onError, requestO
             }
             var finalParts = captureCot ? splitInlineCot(fullContent, fullCot) : { content: fullContent, cot: '' };
             var usageMeta = finalizeUsageMeta(lastUsage, streamElapsedMs());
-            completeWithParts(finalParts.content, finalParts.cot, usageMeta);
+            completeWithParts(finalParts.content, finalParts.cot, usageMeta, {
+                source: completionSource,
+                reasoningDetails: null,
+                structuredReasoningComplete: false
+            });
         }
 
         function processLine(rawLine) {
@@ -24230,7 +24369,7 @@ function updateStreamingBubble(fullContent, conv, label, fullCot, options, meta)
         );
     });
 }
-function finishAssistantMessage(conv, fullContent, speakerForMsg, stage, parentId, fullCot, usageMeta) {
+function finishAssistantMessage(conv, fullContent, speakerForMsg, stage, parentId, fullCot, usageMeta, reasoningMeta) {
     if (!conv || !fullContent) return null;
     var statusCenterResult = stage === 'second'
         ? { visibleText: stripStatusTransportForDisplay(fullContent, true), updates: [] }
@@ -24243,6 +24382,14 @@ function finishAssistantMessage(conv, fullContent, speakerForMsg, stage, parentI
     if (pending && pending.stage !== expectedStage) pending = null;
     var pushObj = { role: 'assistant', content: fullContent, id: pending ? pending.targetId : makeId(), createdAt: Date.now() };
     if (fullCot) pushObj.cot = fullCot;
+    if (reasoningMeta && typeof reasoningMeta === 'object') {
+        pushObj.reasoningMeta = {
+            source: String(reasoningMeta.source || resolveCompletionSource(state.settings, {})),
+            structuredReasoningComplete: !!reasoningMeta.structuredReasoningComplete,
+            reasoningDetails: reasoningMeta.structuredReasoningComplete && Array.isArray(reasoningMeta.reasoningDetails)
+                ? cloneJsonData(reasoningMeta.reasoningDetails) : null
+        };
+    }
     if (speakerForMsg) pushObj.speaker = speakerForMsg;
     if (stage) pushObj.stage = stage;
     if (parentId) pushObj.parentId = parentId;
@@ -24355,11 +24502,11 @@ function runSecondStageGeneration(firstStageMessage, onDone) {
             function onToken(token, fullContent, fullCot) {
                 updateStreamingBubble(fullContent, conv, t('two_stage_sender') || '第二阶段', fullCot);
             },
-            function onComplete(fullContent, fullCot, usageMeta) {
+            function onComplete(fullContent, fullCot, usageMeta, reasoningMeta) {
                 var c = state.conversations && state.conversations[conv.id];
                 if (c && fullContent) {
                     var speaker = firstStageMessage.speaker || null;
-                    finishAssistantMessage(c, fullContent, speaker, 'second', firstStageMessage.id, fullCot, usageMeta);
+                    finishAssistantMessage(c, fullContent, speaker, 'second', firstStageMessage.id, fullCot, usageMeta, reasoningMeta);
                 } else if (c) {
                     clearStreamingDraft(c, true);
                     restoreFailedResponseRegeneration(c);
@@ -24433,7 +24580,7 @@ function completeGenerationTurn(conv) {
     }
 }
 
-function handlePrimaryAssistantComplete(fullContent, fullCot, usageMeta, expectedConv) {
+function handlePrimaryAssistantComplete(fullContent, fullCot, usageMeta, expectedConv, reasoningMeta) {
     var conv = expectedConv && state.conversations
         ? state.conversations[expectedConv.id]
         : getActiveConv();
@@ -24454,7 +24601,7 @@ function handlePrimaryAssistantComplete(fullContent, fullCot, usageMeta, expecte
     var speakerForMsg = isGroupChat(conv)
         ? (conv._nextGroupSpeaker ? conv._nextGroupSpeaker.name : getCurrentGeneratingSpeakerName(conv))
         : null;
-    var firstStageMsg = finishAssistantMessage(conv, fullContent, speakerForMsg, 'main', null, fullCot, usageMeta);
+    var firstStageMsg = finishAssistantMessage(conv, fullContent, speakerForMsg, 'main', null, fullCot, usageMeta, reasoningMeta);
     clearStreamingMessageDom();
 
     if (state.settings.twoStageEnabled && firstStageMsg) {
@@ -28927,7 +29074,7 @@ function cacheDom() {
         'ttsEnabled','ttsProvider','ttsApiEndpoint','ttsApiKey','saveTtsApiKey','ttsApiTestResult','downloadTtsWorkerBtn','ttsModel','ttsVoice','ttsSpeed','ttsSpeedVal','ttsStream','ttsBrowserFallbackEnabled','ttsResponseFormat',
         'contextLength','contextLenVal',
         'maxTokens','maxTokensVal','temperature','tempVal','frequencyPenalty','freqPenaltyVal','presencePenalty','presPenaltyVal','topP','topPVal',
-        'userName','userPersonaSelect','userPersonaTitle','userPersonaAddBtn','userPersonaDupBtn','userPersonaDeleteBtn','systemPrompt','postHistoryInstructions','fillPostHistoryBtn','fillRoleplayPromptBtn','authorsNoteEnabled','authorsNoteText','authorsNotePosition','authorsNoteDepth','authorsNoteRole','authorsNoteInterval','twoStageEnabled','twoStageTemperature','twoStageTempVal','twoStageTopP','twoStageTopPVal','twoStageIncludeRecentContext','twoStageSystemPrompt','twoStagePostHistoryInstructions','restoreTwoStagePromptBtn','requestCotEnabled','showCotEnabled','reasoningEffortEnabled','reasoningEffort','thinkingEnabled','thinkingType','userDescription',
+        'userName','userPersonaSelect','userPersonaTitle','userPersonaAddBtn','userPersonaDupBtn','userPersonaDeleteBtn','systemPrompt','postHistoryInstructions','fillPostHistoryBtn','fillRoleplayPromptBtn','authorsNoteEnabled','authorsNoteText','authorsNotePosition','authorsNoteDepth','authorsNoteRole','authorsNoteInterval','twoStageEnabled','twoStageTemperature','twoStageTempVal','twoStageTopP','twoStageTopPVal','twoStageIncludeRecentContext','twoStageSystemPrompt','twoStagePostHistoryInstructions','restoreTwoStagePromptBtn','requestCotEnabled','showCotEnabled','completionSource','completionSourceHint','includeReasoningInHistory','reasoningEffortEnabled','reasoningEffort','thinkingEnabled','thinkingType','userDescription',
         'stPresetImportBtn','stPresetExportBtn','stPresetDeleteBtn','stPresetRefreshBtn','stPresetAddBtn','stPresetImportFile','stPresetStatus','stPresetTokenCount','stPresetSelect','stPresetSquashBtn','stPresetSquashSystemMessages','stPresetList',
         'stPromptEditor','stPromptEditorName','stPromptEditorRole','stPromptEditorPlacement','stPromptEditorDepth','stPromptEditorContent','stPromptEditorDynamicHint','stPromptEditorDeleteBtn','stPromptEditorCancelBtn','stPromptEditorSaveBtn',
         'importModal','importBackdrop','importCloseBtn','importFileInput','importStatus',
@@ -35561,8 +35708,8 @@ function regenerateMessage(actualIdx) {
             function onToken(token, fullContent, fullCot) {
                 updateStreamingBubble(fullContent, conv, getCurrentGeneratingSpeakerName(conv), fullCot);
             },
-            function onComplete(fullContent, fullCot, usageMeta) {
-                handlePrimaryAssistantComplete(fullContent, fullCot, usageMeta, conv);
+            function onComplete(fullContent, fullCot, usageMeta, reasoningMeta) {
+                handlePrimaryAssistantComplete(fullContent, fullCot, usageMeta, conv, reasoningMeta);
             },
             function onError(err) {
                 state.isGenerating = false;
@@ -36064,8 +36211,8 @@ function generateAfterUserEdit(conv) {
             function onToken(token, fullContent, fullCot) {
                 updateStreamingBubble(fullContent, conv, getCurrentGeneratingSpeakerName(conv), fullCot);
             },
-            function onComplete(fullContent, fullCot, usageMeta) {
-                handlePrimaryAssistantComplete(fullContent, fullCot, usageMeta, conv);
+            function onComplete(fullContent, fullCot, usageMeta, reasoningMeta) {
+                handlePrimaryAssistantComplete(fullContent, fullCot, usageMeta, conv, reasoningMeta);
             },
             function onError(err) {
                 state.isGenerating = false;
@@ -36776,8 +36923,8 @@ function sendMessage() {
             function onToken(token, fullContent, fullCot) {
                 updateStreamingBubble(fullContent, conv, getCurrentGeneratingSpeakerName(conv), fullCot);
             },
-            function onComplete(fullContent, fullCot, usageMeta) {
-                handlePrimaryAssistantComplete(fullContent, fullCot, usageMeta, conv);
+            function onComplete(fullContent, fullCot, usageMeta, reasoningMeta) {
+                handlePrimaryAssistantComplete(fullContent, fullCot, usageMeta, conv, reasoningMeta);
             },
             function onError(err) {
                 state.isGenerating = false;
@@ -37352,8 +37499,20 @@ function bindEvents() {
         if (dom.twoStagePostHistoryInstructions) dom.twoStagePostHistoryInstructions.value = state.settings.twoStagePostHistoryInstructions || '';
         if (dom.requestCotEnabled) dom.requestCotEnabled.checked = state.settings.requestCotEnabled !== false;
         if (dom.showCotEnabled) dom.showCotEnabled.checked = state.settings.showCotEnabled !== false;
+        state.settings.completionSource = normalizeCompletionSource(state.settings.completionSource);
+        if (dom.completionSource) dom.completionSource.value = state.settings.completionSource;
+        if (dom.includeReasoningInHistory) dom.includeReasoningInHistory.checked = state.settings.includeReasoningInHistory === true;
+        updateCompletionSourceHint();
         if (typeof ensureReasoningEffortSettings === 'function') ensureReasoningEffortSettings();
         if (typeof ensureThinkingSettings === 'function') ensureThinkingSettings();
+        if (dom.completionSource && !dom.completionSource.dataset.reasoningBound) {
+            dom.completionSource.dataset.reasoningBound = 'true';
+            dom.completionSource.addEventListener('change', updateCompletionSourceHint);
+        }
+        if (dom.apiEndpoint && !dom.apiEndpoint.dataset.reasoningSourceBound) {
+            dom.apiEndpoint.dataset.reasoningSourceBound = 'true';
+            dom.apiEndpoint.addEventListener('input', updateCompletionSourceHint);
+        }
         if (dom.reasoningEffortEnabled) dom.reasoningEffortEnabled.checked = !!state.settings.reasoningEffortEnabled;
         if (dom.reasoningEffort) dom.reasoningEffort.value = normalizeReasoningEffortLevel(state.settings.reasoningEffort);
         if (dom.thinkingEnabled) dom.thinkingEnabled.checked = !!state.settings.thinkingEnabled;
@@ -37767,6 +37926,8 @@ function bindEvents() {
         if (dom.twoStagePostHistoryInstructions) state.settings.twoStagePostHistoryInstructions = dom.twoStagePostHistoryInstructions.value.trim();
         if (dom.requestCotEnabled) state.settings.requestCotEnabled = !!dom.requestCotEnabled.checked;
         if (dom.showCotEnabled) state.settings.showCotEnabled = !!dom.showCotEnabled.checked;
+        if (dom.completionSource) state.settings.completionSource = normalizeCompletionSource(dom.completionSource.value);
+        if (dom.includeReasoningInHistory) state.settings.includeReasoningInHistory = !!dom.includeReasoningInHistory.checked;
         if (dom.reasoningEffortEnabled) state.settings.reasoningEffortEnabled = !!dom.reasoningEffortEnabled.checked;
         if (dom.reasoningEffort) state.settings.reasoningEffort = normalizeReasoningEffortLevel(dom.reasoningEffort.value);
         if (dom.thinkingEnabled) state.settings.thinkingEnabled = !!dom.thinkingEnabled.checked;
