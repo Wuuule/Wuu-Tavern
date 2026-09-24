@@ -13756,6 +13756,7 @@ var renderSubscriptions = {
         renderMessagesOnly();
         renderCharacterUI();
         renderWorldInfoBudgetWarning();
+        window.dispatchEvent(new CustomEvent('ot-chat-context-changed'));
     },
     'isGenerating': function() {
         updateInputState();
@@ -13916,12 +13917,13 @@ function appendFinalAssistantMessage(conv, fullContent, fullCot) {
         <div class="max-w-[80%] msg-wrapper">
             ${renderAssistantNameAndAvatarHtml(senderName, getMessageSpeakerCharacter(lastMsg, conv))}
             ${renderCotBlock(fullCot, false, { conv: conv, msg: lastMsg, actualIdx: actualIdx, character: getMessageSpeakerCharacter(lastMsg, conv) })}
-            ${renderMessageBubbleShell(renderAssistantContent(fullContent, { conv: conv, msg: lastMsg, actualIdx: actualIdx, character: getMessageSpeakerCharacter(lastMsg, conv) }), lastMsg, actualIdx)}
+            ${renderMessageBubbleShell(renderAssistantContent(fullContent, { conv: conv, msg: lastMsg, actualIdx: actualIdx, character: getMessageSpeakerCharacter(lastMsg, conv) }) + renderMessageAttachments(lastMsg), lastMsg, actualIdx)}
             <div class="msg-actions">${renderGreetingSwipeControls(lastMsg, actualIdx)}
                 <button class="msg-action-btn copy-btn" data-action="copy" data-msg-idx="${actualIdx}" title="${t('copy')}">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                 </button>
                 ${renderFavoriteStarHtml(lastMsg, actualIdx)}
+                ${renderChatImageAction(actualIdx)}
                 ${renderSpeakButton(actualIdx)}
                 <button class="msg-action-btn edit-btn" data-action="edit" data-msg-idx="${actualIdx}" title="${t('edit_msg')}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
                 ${renderContinueButton(conv, lastMsg, actualIdx)}
@@ -30618,6 +30620,7 @@ function renderMessages() {
                             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                         </button>
                         ${renderFavoriteStarHtml(msg, actualIdx)}
+                        ${renderChatImageAction(actualIdx)}
                         ${renderSpeakButton(actualIdx)}
                         <button class="msg-action-btn edit-btn" data-action="edit" data-msg-idx="${actualIdx}" title="${t('edit_msg')}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
                         ${isUser ? renderMessageEditedLabel(msg) : ''}
@@ -30673,6 +30676,7 @@ function renderMessages() {
         html += renderGreetingSwipeControls(msg, actualIdx);
         html += '<button class="msg-action-btn copy-btn" data-action="copy" data-msg-idx="' + actualIdx + '" title="' + t('copy') + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>';
         html += renderFavoriteStarHtml(msg, actualIdx);
+        html += renderChatImageAction(actualIdx);
         html += renderSpeakButton(actualIdx);
         html += '<button class="msg-action-btn edit-btn" data-action="edit" data-msg-idx="' + actualIdx + '" title="' + t('edit_msg') + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>';
         if (isUser) html += renderMessageEditedLabel(msg);
@@ -30747,6 +30751,7 @@ function renderMessagesFullHistory(conv) {
         html += renderGreetingSwipeControls(msg, actualIdx);
         html += '<button class="msg-action-btn copy-btn" data-action="copy" data-msg-idx="' + actualIdx + '" title="' + t('copy') + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>';
         html += renderFavoriteStarHtml(msg, actualIdx);
+        html += renderChatImageAction(actualIdx);
         html += renderSpeakButton(actualIdx);
         html += '<button class="msg-action-btn edit-btn" data-action="edit" data-msg-idx="' + actualIdx + '" title="' + t('edit_msg') + '"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>';
         if (isUser) html += renderMessageEditedLabel(msg);
@@ -34636,6 +34641,68 @@ function renderAssistantContent(text, context) {
     return html;
 }
 
+function renderChatImageAction(idx) {
+    return '<button class="msg-action-btn" data-action="attach-image" data-msg-idx="' + idx +
+        '" title="插入图片" aria-label="插入图片">🖼</button>';
+}
+function isSafeChatImageSource(url) {
+    return /^https:\/\//i.test(String(url||'')) ||
+        /^data:image\/(?:png|jpe?g|webp|gif);base64,[a-z0-9+/=]+$/i.test(String(url||''));
+}
+async function insertChatImageAtMessage(idx) {
+    if (state.isGenerating) return;
+    var conv = getActiveConv(), msg = conv && conv.messages[idx];
+    if (!msg) return;
+    var url = await showGlassPrompt(
+        '输入 https 图片直链；留空则选择本地图片。图片只显示在此消息内，不会自动发送给模型。',
+        { title:'插入聊天图片', input:{value:'',placeholder:'https://...（留空选本地文件）',maxLength:2000} }
+    );
+    if (url == null || getActiveConv() !== conv || state.isGenerating || !conv.messages.includes(msg)) return;
+    url = String(url).trim();
+    var attachment = null;
+    if (url) {
+        if (!/^https:\/\//i.test(url)) {
+            await showGlassConfirm('图片地址必须以 https:// 开头。', {title:'图片地址无效',showCancel:false});
+            return;
+        }
+        attachment = {type:'image',source:'chat_embed',url:url,name:'聊天引用图片',createdAt:Date.now()};
+    } else {
+        var file = await new Promise(function(resolve) {
+            var input = document.createElement('input');
+            input.type='file';input.accept='image/jpeg,image/png,image/webp,image/gif';
+            input.hidden=true;document.body.appendChild(input);
+            var finished=false;
+            function done(f) {if(finished)return;finished=true;input.remove();resolve(f||null);}
+            input.addEventListener('change',function(){done(input.files && input.files[0]);},{once:true});
+            input.addEventListener('cancel',function(){done(null);},{once:true});
+            input.click();
+            setTimeout(function(){if(!finished)done(null);},120000);
+        });
+        if (!file) return;
+        try {
+            var out = await compressComposerImageBlob(file,file.name);
+            attachment = {type:'image',source:'chat_embed',dataUrl:out.dataUrl,mime:out.mime,
+                name:out.name,createdAt:Date.now()};
+        } catch(err) {
+            console.warn('[Chat Images] Failed import',err);
+            await showGlassConfirm('图片文件无法读取或超出大小限制。',{title:'上传失败',showCancel:false});
+            return;
+        }
+    }
+    if (state.isGenerating || getActiveConv() !== conv || !conv.messages.includes(msg)) return;
+    if (!isSafeChatImageSource(attachment.url || attachment.dataUrl)) return;
+    if (!Array.isArray(msg.attachments)) msg.attachments=[];
+    if (msg.attachments.length >= 12) {
+        await showGlassConfirm('每条消息最多附加12张图片。',{showCancel:false,title:'图片数量限制'});
+        return;
+    }
+    msg.attachments.push(attachment);
+    conv.updated=Date.now();
+    var saved=await persistState(true);
+    requestRender('activeConvId');
+    if (saved === false) await showGlassConfirm('图片已在内存中显示，但保存失败，请立即导出备份。',{showCancel:false,title:'保存失败'});
+}
+
 function renderMessageAttachments(msg) {
     if (!msg || !Array.isArray(msg.attachments) || msg.attachments.length === 0) return '';
     var html = '<div class="msg-attachments">';
@@ -34643,12 +34710,13 @@ function renderMessageAttachments(msg) {
         if (!att || att.type !== 'image') return;
         var src = att.dataUrl || att.url || '';
         if (!src) return;
+        if (att.source === 'chat_embed' && !isSafeChatImageSource(src)) return;
         var label = att.source === 'comfyui'
             ? 'ComfyUI'
             : (att.name || (typeof t === 'function' ? t('composer_image_source_user') : (att.source || 'Image')));
         var prompt = att.prompt ? String(att.prompt) : '';
         html += '<figure>';
-        html += '<img class="msg-attachment-image" src="' + escapeHtml(src) + '" alt="' + escapeHtml(label) + '" loading="lazy">';
+        html += '<img class="msg-attachment-image" src="' + escapeHtml(src) + '" alt="' + escapeHtml(label) + '" loading="lazy" referrerpolicy="no-referrer">';
         html += '<figcaption class="msg-attachment-caption">' + escapeHtml(label + (prompt ? ' · ' + prompt.slice(0, 180) : '')) + '</figcaption>';
         html += '</figure>';
     });
@@ -36570,6 +36638,8 @@ function bindEvents() {
             }
         } else if (action === 'favorite') {
             toggleMessageFavorite(idx);
+        } else if (action === 'attach-image') {
+            if (!state.isGenerating) insertChatImageAtMessage(idx);
         } else if (action === 'speak') {
             speakMessageText(idx, btn);
         } else if (action === 'delete') {
